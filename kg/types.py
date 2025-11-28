@@ -7,6 +7,7 @@ NodeType = Literal[
     "Person",
     "Event",
     "Concept",
+    "Organization",
     "Work",
     "Place",
     "Period",
@@ -38,3 +39,4 @@ class EdgeCandidate(BaseModel):
     description: Optional[str] = None
     source_id: Optional[str] = None
     confidence: Optional[float] = None
+    meta: Dict = Field(default_factory=dict)

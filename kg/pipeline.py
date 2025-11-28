@@ -110,12 +110,32 @@ class LLMExtractor(BaseExtractor):
     def __init__(self, client, model: str, relations: Optional[List[str]] = None):
         self.client = client
         self.model = model
-        self.relations = relations or []
+        self.relations = relations or [
+            "RELATES_TO",
+            "BELIEVES_IN",
+            "OPPOSES",
+            "INFLUENCED_BY",
+            "FRIEND_OF",
+            "ENEMY_OF",
+            "MENTORED_BY",
+            "MEMBER_OF",
+            "PARTICIPATED_IN",
+            "OCCURRED_AT",
+            "OCCURRED_DURING",
+            "WROTE",
+            "DISCUSSES",
+            "REFERENCES",
+            "CONTRADICTS",
+            "SUPPORTS",
+            "INSPIRED_BY",
+            "FOUNDED",
+        ]
         self.allowed_types = {
             "Character",
             "Person",
             "Event",
             "Concept",
+            "Organization",
             "Work",
             "Place",
             "Period",
@@ -126,10 +146,11 @@ class LLMExtractor(BaseExtractor):
         self, segments: List[Segment], character: Optional[str] = None
     ) -> GraphExtractionResult:
         prompt = self._build_prompt(segments, character)
+        response_format = self._build_response_format()
         response = self.client.chat.completions.create(
             model=self.model,
             messages=[{"role": "user", "content": prompt}],
-            response_format={"type": "json_object"},
+            response_format=response_format,
         )
         content = response.choices[0].message.content
         data = json.loads(content)
@@ -152,10 +173,76 @@ class LLMExtractor(BaseExtractor):
             f"Known character focus: {character or 'none specified'}.\n"
             "Return strictly valid JSON with top-level keys 'nodes' and 'edges'.\n"
             "nodes: array of {name: string, type: one of [" + node_types + "], summary?: string, alias_names?: string[], meta?: object, source_id?: string}\n"
-            "edges: array of {from_name: string, to_name: string, relation: one of [" + relation_vocab + "], description?: string, source_id?: string, confidence?: number}\n"
+            "edges: array of {from_name: string, to_name: string, relation: one of [" + relation_vocab + "], description?: string, meta?: {nature?: string}, source_id?: string, confidence?: number}\n"
             "Do not invent types outside the allowed list. Always include from_name and to_name for edges. Use the provided relation vocabulary only.\n"
             "Text segments:\n" + "\n".join(text_blocks)
         )
+
+    def _build_response_format(self) -> dict:
+        """Structured output schema for OpenAI JSON schema mode."""
+        relation_vocab = self.relations or [
+            "RELATES_TO",
+            "BELIEVES_IN",
+            "OPPOSES",
+            "INFLUENCED_BY",
+            "REFERENCES",
+            "CONTRADICTS",
+            "SUPPORTS",
+        ]
+        return {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "graph_schema",
+                "schema": {
+                    "type": "object",
+                    "properties": {
+                        "nodes": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "name": {"type": "string"},
+                                    "type": {"type": "string", "enum": sorted(self.allowed_types)},
+                                    "summary": {"type": "string"},
+                                    "alias_names": {"type": "array", "items": {"type": "string"}},
+                                    "meta": {"type": "object", "additionalProperties": True},
+                                    "source_id": {"type": "string"},
+                                },
+                                "required": ["name", "type"],
+                                "additionalProperties": False,
+                            },
+                            "default": [],
+                        },
+                        "edges": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "from_name": {"type": "string"},
+                                    "to_name": {"type": "string"},
+                                    "relation": {"type": "string", "enum": relation_vocab},
+                                    "description": {"type": "string"},
+                                    "source_id": {"type": "string"},
+                                    "confidence": {"type": "number"},
+                                    "meta": {
+                                        "type": "object",
+                                        "additionalProperties": True,
+                                        "properties": {
+                                            "nature": {"type": "string"},
+                                        },
+                                    },
+                                },
+                                "required": ["from_name", "to_name", "relation"],
+                                "additionalProperties": False,
+                            },
+                            "default": [],
+                        },
+                    },
+                    "required": ["nodes", "edges"],
+                    "additionalProperties": False,
+                },
+            },
+        }
 
     def _normalize_nodes(self, raw_nodes: list) -> List[dict]:
         normalized = []
@@ -174,6 +261,7 @@ class LLMExtractor(BaseExtractor):
 
     def _normalize_edges(self, raw_edges: list) -> List[dict]:
         normalized_edges = []
+        allowed_relations = set(self.relations)
         for edge in raw_edges:
             ecopy = dict(edge)
             if "from_name" not in ecopy:
@@ -187,11 +275,15 @@ class LLMExtractor(BaseExtractor):
                         ecopy["to_name"] = ecopy[key]
                         break
             if "relation" in ecopy and isinstance(ecopy["relation"], str):
-                ecopy["relation"] = ecopy["relation"].upper()
-            if self.relations and ecopy.get("relation") not in self.relations:
-                raise ValueError(f"LLM returned unsupported relation '{ecopy.get('relation')}'")
+                sanitized = re.sub(r"[^A-Za-z0-9]+", "_", ecopy["relation"]).strip("_").upper()
+                ecopy["relation"] = sanitized
+            if self.relations and ecopy.get("relation") not in allowed_relations:
+                logger.warning("Skipping edge with unsupported relation: %s", ecopy.get("relation"))
+                continue
             if "confidence" not in ecopy and "weight" in ecopy:
                 ecopy["confidence"] = ecopy["weight"]
+            if "meta" not in ecopy:
+                ecopy["meta"] = {}
             if "from_name" not in ecopy or "to_name" not in ecopy:
                 raise ValueError(f"LLM returned edge missing endpoints: {ecopy}")
             normalized_edges.append(ecopy)

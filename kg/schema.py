@@ -65,6 +65,7 @@ class KGEdge(Base):
     weight = Column(Float)
     description = Column(Text)
     source_ids = Column(ARRAY(String), default=list)
+    meta = Column(JSONB, default=dict)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
     from_node = relationship("KGBasicNode", foreign_keys=[from_id])

@@ -73,6 +73,30 @@ def main():
         default=list(DEFAULT_RELATIONS),
         help="Relation vocabulary for the extractor.",
     )
+    parser.add_argument(
+        "--llm-batch-threshold",
+        type=int,
+        default=32,
+        help="Max segments per single LLM prompt before batching kicks in.",
+    )
+    parser.add_argument(
+        "--llm-batch-size",
+        type=int,
+        default=10,
+        help="Number of segments per LLM batch when pagination is enabled.",
+    )
+    parser.add_argument(
+        "--llm-batch-overlap",
+        type=int,
+        default=1,
+        help="How many segments to overlap between consecutive LLM batches.",
+    )
+    parser.add_argument(
+        "--llm-max-workers",
+        type=int,
+        default=4,
+        help="Maximum number of parallel LLM requests when batching.",
+    )
     args = parser.parse_args()
 
     if not args.text and not args.pdf:
@@ -97,7 +121,15 @@ def main():
         if not api_key:
             raise ValueError("OPENAI_API_KEY is required when using --use-llm")
         client = OpenAI(api_key=api_key)
-        extractor = LLMExtractor(client=client, model=args.model, relations=args.relations)
+        extractor = LLMExtractor(
+            client=client,
+            model=args.model,
+            relations=args.relations,
+            batch_threshold=args.llm_batch_threshold,
+            batch_size=args.llm_batch_size,
+            batch_overlap=args.llm_batch_overlap,
+            max_workers=args.llm_max_workers,
+        )
         extractor_name = f"LLMExtractor(model={args.model})"
     else:
         extractor = MockExtractor()

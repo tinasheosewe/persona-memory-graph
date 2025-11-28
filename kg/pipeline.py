@@ -4,8 +4,9 @@ from __future__ import annotations
 import json
 import logging
 import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
-from typing import Iterable, List, Optional, Protocol
+from typing import Dict, Iterable, List, Optional, Protocol, Sequence, Tuple
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -129,15 +130,72 @@ class LLMExtractor(BaseExtractor):
     }
     """
 
-    def __init__(self, client, model: str, relations: Optional[List[str]] = None):
+    def __init__(
+        self,
+        client,
+        model: str,
+        relations: Optional[List[str]] = None,
+        batch_threshold: int = 32,
+        batch_size: int = 10,
+        batch_overlap: int = 1,
+        max_workers: int = 4,
+    ):
         self.client = client
         self.model = model
         self.relations = list(relations or DEFAULT_RELATIONS)
         self.allowed_types = set(NODE_TYPE_VALUES)
+        self.batch_threshold = max(1, batch_threshold)
+        self.batch_size = max(1, batch_size)
+        if batch_overlap >= self.batch_size:
+            logger.warning(
+                "batch_overlap (%s) >= batch_size (%s); reducing overlap to batch_size-1",
+                batch_overlap,
+                self.batch_size,
+            )
+        self.batch_overlap = max(0, min(batch_overlap, self.batch_size - 1))
+        self.max_workers = max(1, max_workers)
 
     def extract(
         self, segments: List[Segment], character: Optional[str] = None
     ) -> GraphExtractionResult:
+        if len(segments) <= self.batch_threshold:
+            return self._extract_single(segments, character)
+        return self._extract_batched(segments, character)
+
+    def _extract_single(
+        self, segments: List[Segment], character: Optional[str]
+    ) -> GraphExtractionResult:
+        payload = self._invoke_llm(segments, character)
+        return self._result_from_payload(payload)
+
+    def _extract_batched(
+        self, segments: List[Segment], character: Optional[str]
+    ) -> GraphExtractionResult:
+        batches = self._create_batches(segments)
+        logger.info(
+            "LLMExtractor batching %s segments into %s requests (size=%s, overlap=%s)",
+            len(segments),
+            len(batches),
+            self.batch_size,
+            self.batch_overlap,
+        )
+        batch_payloads: List[Optional[dict]] = [None] * len(batches)
+        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+            future_to_index = {
+                executor.submit(self._invoke_llm, batch, character): index
+                for index, batch in enumerate(batches)
+            }
+            for future in as_completed(future_to_index):
+                index = future_to_index[future]
+                batch_payloads[index] = future.result()
+        batch_results = [
+            self._result_from_payload(payload)
+            for payload in batch_payloads
+            if payload is not None
+        ]
+        return self._merge_results(batch_results)
+
+    def _invoke_llm(self, segments: List[Segment], character: Optional[str]) -> dict:
         prompt = self._build_prompt(segments, character)
         response_format = self._build_response_format()
         response = self.client.chat.completions.create(
@@ -146,7 +204,9 @@ class LLMExtractor(BaseExtractor):
             response_format=response_format,
         )
         content = response.choices[0].message.content
-        data = json.loads(content)
+        return json.loads(content)
+
+    def _result_from_payload(self, data: dict) -> GraphExtractionResult:
         nodes = [NodeCandidate(**node) for node in self._normalize_nodes(data.get("nodes", []))]
         edges = [EdgeCandidate(**edge) for edge in self._normalize_edges(data.get("edges", []))]
         return GraphExtractionResult(nodes=nodes, edges=edges)
@@ -277,6 +337,91 @@ class LLMExtractor(BaseExtractor):
                 raise ValueError(f"LLM returned edge missing endpoints: {ecopy}")
             normalized_edges.append(ecopy)
         return normalized_edges
+
+    def _create_batches(self, segments: Sequence[Segment]) -> List[List[Segment]]:
+        if len(segments) <= self.batch_size:
+            return [list(segments)]
+        stride = max(1, self.batch_size - self.batch_overlap)
+        seg_list = list(segments)
+        batches: List[List[Segment]] = []
+        start = 0
+        while start < len(seg_list):
+            end = min(len(seg_list), start + self.batch_size)
+            batches.append(seg_list[start:end])
+            if end >= len(seg_list):
+                break
+            start += stride
+        return batches
+
+    def _merge_results(
+        self, results: Sequence[GraphExtractionResult]
+    ) -> GraphExtractionResult:
+        node_map: Dict[Tuple[str, str], NodeCandidate] = {}
+        edge_map: Dict[Tuple[str, str, str], EdgeCandidate] = {}
+        for result in results:
+            self._merge_nodes(result.nodes, node_map)
+            self._merge_edges(result.edges, edge_map)
+        merged_nodes = sorted(
+            node_map.values(),
+            key=lambda n: (n.type, n.name.lower()),
+        )
+        merged_edges = sorted(
+            edge_map.values(),
+            key=lambda e: (e.from_name.lower(), e.to_name.lower(), e.relation),
+        )
+        return GraphExtractionResult(nodes=merged_nodes, edges=merged_edges)
+
+    def _merge_nodes(
+        self,
+        nodes: Iterable[NodeCandidate],
+        node_map: Dict[Tuple[str, str], NodeCandidate],
+    ) -> None:
+        for node in nodes:
+            key = (node.name.lower(), node.type)
+            if key not in node_map:
+                node_map[key] = node
+                continue
+            existing = node_map[key]
+            alias_names = sorted(
+                set((existing.alias_names or [])) | set(node.alias_names or [])
+            )
+            summary = existing.summary or node.summary
+            meta = {**(existing.meta or {}), **(node.meta or {})}
+            source_id = existing.source_id or node.source_id
+            node_map[key] = NodeCandidate(
+                name=existing.name,
+                type=existing.type,
+                summary=summary,
+                alias_names=alias_names,
+                meta=meta,
+                source_id=source_id,
+            )
+
+    def _merge_edges(
+        self,
+        edges: Iterable[EdgeCandidate],
+        edge_map: Dict[Tuple[str, str, str], EdgeCandidate],
+    ) -> None:
+        for edge in edges:
+            key = (edge.from_name.lower(), edge.to_name.lower(), edge.relation)
+            if key not in edge_map:
+                edge_map[key] = edge
+                continue
+            existing = edge_map[key]
+            description = existing.description or edge.description
+            meta = {**(existing.meta or {}), **(edge.meta or {})}
+            source_id = existing.source_id or edge.source_id
+            confidences = [c for c in (existing.confidence, edge.confidence) if c is not None]
+            confidence = max(confidences) if confidences else None
+            edge_map[key] = EdgeCandidate(
+                from_name=existing.from_name,
+                to_name=existing.to_name,
+                relation=existing.relation,
+                description=description,
+                source_id=source_id,
+                confidence=confidence,
+                meta=meta,
+            )
 
 
 class MockExtractor(BaseExtractor):

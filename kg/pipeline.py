@@ -34,17 +34,23 @@ def segment_text(
     work_name: str,
     location_prefix: Optional[str] = None,
     max_words: int = 120,
+    overlap_sentences: int = 1,
 ) -> List[Segment]:
-    """Lightweight segmenter that respects paragraph breaks and word budgets."""
+    """
+    Sentence-aware segmenter that packs whole sentences into chunks up to `max_words`,
+    never splitting a sentence. Optional `overlap_sentences` (default 1) carries context between chunks.
+    """
     raw_paragraphs = [p.strip() for p in text.split("\n\n") if p.strip()]
     segments: List[Segment] = []
     for para_index, paragraph in enumerate(raw_paragraphs):
-        words = paragraph.split()
-        chunk = []
+        sentences = split_sentences(paragraph)
+        chunk: List[str] = []
+        chunk_words = 0
         chunk_index = 0
-        for word in words:
-            chunk.append(word)
-            if len(chunk) >= max_words:
+        for sentence in sentences:
+            sent_words = len(sentence.split())
+            # start a new chunk if adding this sentence would exceed the limit
+            if chunk and chunk_words + sent_words > max_words:
                 segment_id = f"{slugify(work_name)}-{para_index}-{chunk_index}"
                 segments.append(
                     Segment(
@@ -54,8 +60,14 @@ def segment_text(
                         content=" ".join(chunk),
                     )
                 )
-                chunk = []
                 chunk_index += 1
+                if overlap_sentences > 0:
+                    chunk = chunk[-overlap_sentences:]
+                else:
+                    chunk = []
+                chunk_words = sum(len(s.split()) for s in chunk)
+            chunk.append(sentence)
+            chunk_words += sent_words
         if chunk:
             segment_id = f"{slugify(work_name)}-{para_index}-{chunk_index}"
             segments.append(
@@ -73,6 +85,15 @@ def slugify(value: str) -> str:
     value = value.lower()
     value = re.sub(r"[^a-z0-9]+", "-", value)
     return value.strip("-")
+
+
+def split_sentences(paragraph: str) -> List[str]:
+    """
+    Lightweight sentence splitter using punctuation boundaries.
+    Keeps punctuation attached and trims whitespace.
+    """
+    raw = re.split(r"(?<=[.!?])\s+", paragraph.strip())
+    return [s.strip() for s in raw if s.strip()]
 
 
 class LLMExtractor(BaseExtractor):

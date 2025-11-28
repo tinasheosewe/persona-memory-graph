@@ -17,12 +17,29 @@ class TestPipeline(unittest.TestCase):
         self.assertEqual(slugify("Hello World!"), "hello-world")
         self.assertEqual(slugify("Already-clean"), "already-clean")
 
-    def test_segment_text_respects_word_budget(self):
-        text = " ".join([f"word{i}" for i in range(50)])
-        segments = segment_text(text, work_name="Test Work", max_words=20)
-        self.assertEqual(len(segments), 3)
-        self.assertTrue(all(len(seg.content.split()) <= 20 for seg in segments))
+    def test_segment_text_respects_word_budget_sentence_safe(self):
+        sentences = [
+            "alpha beta gamma delta epsilon.",
+            "zeta eta theta iota kappa.",
+            "lambda mu nu xi omicron.",
+            "pi rho sigma tau upsilon.",
+            "phi chi psi omega omega.",
+            "one two three four five.",
+        ]
+        text = " ".join(sentences)
+        segments = segment_text(
+            text,
+            work_name="Test Work",
+            max_words=12,
+            overlap_sentences=1,
+        )
+        # Expect multiple chunks, none exceeding 12 words, and overlap present
+        self.assertTrue(len(segments) >= 4)
+        self.assertTrue(all(len(seg.content.split()) <= 12 for seg in segments))
         self.assertTrue(segments[0].id.startswith("test-work-0-0"))
+        if len(segments) >= 2:
+            first_last_sentence = segments[0].content.strip().split(".")[-2].strip() + "."
+            self.assertIn(first_last_sentence, segments[1].content)
 
     def test_llm_extractor_parses_json(self):
         payload = {

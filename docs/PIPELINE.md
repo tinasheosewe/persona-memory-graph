@@ -20,7 +20,7 @@ This doc explains how the toolkit turns raw documents into a character-focused k
 
 ## Pipeline: document → graph (Postgres)
 1. **Ingest text**: call `GraphBuilder.build_from_text(text, work_name, character=...)`.
-2. **Segment**: `segment_text` yields paragraph chunks (default `max_words=120`) with IDs like `book-i-0-0`.
+2. **Segment**: `segment_text` packs whole sentences into chunks up to `max_words` (default 120), never splitting a sentence, with `overlap_sentences` (default 1) to carry context between chunks. IDs look like `book-i-0-0`.
 3. **Ensure Work node**: `_ensure_work_node` creates/returns the `Work` node for `work_name`.
 4. **Store segments**: `_store_segments` writes `source_segments` rows tied to the `Work` node.
 5. **Extract**: `extractor.extract(segments, character=...)` returns `NodeCandidate` and `EdgeCandidate` lists.

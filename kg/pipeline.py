@@ -11,7 +11,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from .schema import KGBasicNode, KGEdge, SourceSegment
-from .types import EdgeCandidate, NodeCandidate, Segment
+from .types import EdgeCandidate, NodeCandidate, Segment, NODE_TYPE_VALUES
 
 logger = logging.getLogger(__name__)
 
@@ -20,6 +20,28 @@ logger = logging.getLogger(__name__)
 class GraphExtractionResult:
     nodes: List[NodeCandidate]
     edges: List[EdgeCandidate]
+
+
+DEFAULT_RELATIONS: tuple[str, ...] = (
+    "RELATES_TO",
+    "BELIEVES_IN",
+    "OPPOSES",
+    "INFLUENCED_BY",
+    "FRIEND_OF",
+    "ENEMY_OF",
+    "MENTORED_BY",
+    "MEMBER_OF",
+    "PARTICIPATED_IN",
+    "OCCURRED_AT",
+    "OCCURRED_DURING",
+    "WROTE",
+    "DISCUSSES",
+    "REFERENCES",
+    "CONTRADICTS",
+    "SUPPORTS",
+    "INSPIRED_BY",
+    "FOUNDED",
+)
 
 
 class BaseExtractor(Protocol):
@@ -110,37 +132,8 @@ class LLMExtractor(BaseExtractor):
     def __init__(self, client, model: str, relations: Optional[List[str]] = None):
         self.client = client
         self.model = model
-        self.relations = relations or [
-            "RELATES_TO",
-            "BELIEVES_IN",
-            "OPPOSES",
-            "INFLUENCED_BY",
-            "FRIEND_OF",
-            "ENEMY_OF",
-            "MENTORED_BY",
-            "MEMBER_OF",
-            "PARTICIPATED_IN",
-            "OCCURRED_AT",
-            "OCCURRED_DURING",
-            "WROTE",
-            "DISCUSSES",
-            "REFERENCES",
-            "CONTRADICTS",
-            "SUPPORTS",
-            "INSPIRED_BY",
-            "FOUNDED",
-        ]
-        self.allowed_types = {
-            "Character",
-            "Person",
-            "Event",
-            "Concept",
-            "Organization",
-            "Work",
-            "Place",
-            "Period",
-            "SourceSegment",
-        }
+        self.relations = list(relations or DEFAULT_RELATIONS)
+        self.allowed_types = set(NODE_TYPE_VALUES)
 
     def extract(
         self, segments: List[Segment], character: Optional[str] = None
@@ -166,7 +159,11 @@ class LLMExtractor(BaseExtractor):
             text_blocks.append(
                 f"[{segment.id}] ({segment.location}) {segment.content}"
             )
-        relation_vocab = ", ".join(self.relations) if self.relations else "RELATES_TO,BELIEVES_IN,OPPOSES,INFLUENCED_BY,REFERENCES,CONTRADICTS,SUPPORTS"
+        relation_vocab = (
+            ", ".join(self.relations)
+            if self.relations
+            else ", ".join(DEFAULT_RELATIONS)
+        )
         node_types = ", ".join(sorted(self.allowed_types))
         return (
             "Extract graph facts about the character and related entities.\n"
@@ -180,15 +177,7 @@ class LLMExtractor(BaseExtractor):
 
     def _build_response_format(self) -> dict:
         """Structured output schema for OpenAI JSON schema mode."""
-        relation_vocab = self.relations or [
-            "RELATES_TO",
-            "BELIEVES_IN",
-            "OPPOSES",
-            "INFLUENCED_BY",
-            "REFERENCES",
-            "CONTRADICTS",
-            "SUPPORTS",
-        ]
+        relation_vocab = self.relations or list(DEFAULT_RELATIONS)
         return {
             "type": "json_schema",
             "json_schema": {

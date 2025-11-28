@@ -19,7 +19,7 @@ try:
 except Exception:  # pragma: no cover - pypdf is optional
     PdfReader = None
 
-from kg.pipeline import LLMExtractor, MockExtractor, segment_text
+from kg.pipeline import DEFAULT_RELATIONS, LLMExtractor, MockExtractor, segment_text
 
 
 def read_text(path: Path) -> str:
@@ -57,26 +57,7 @@ def main():
     parser.add_argument(
         "--relations",
         nargs="*",
-        default=[
-            "RELATES_TO",
-            "BELIEVES_IN",
-            "OPPOSES",
-            "INFLUENCED_BY",
-            "FRIEND_OF",
-            "ENEMY_OF",
-            "MENTORED_BY",
-            "MEMBER_OF",
-            "PARTICIPATED_IN",
-            "OCCURRED_AT",
-            "OCCURRED_DURING",
-            "WROTE",
-            "DISCUSSES",
-            "REFERENCES",
-            "CONTRADICTS",
-            "SUPPORTS",
-            "INSPIRED_BY",
-            "FOUNDED",
-        ],
+        default=list(DEFAULT_RELATIONS),
         help="Relation vocabulary for the extractor.",
     )
     args = parser.parse_args()

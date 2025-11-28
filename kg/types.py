@@ -1,4 +1,4 @@
-from typing import Dict, List, Literal, Optional
+from typing import Dict, List, Literal, Optional, get_args
 
 from pydantic import BaseModel, Field
 
@@ -13,6 +13,8 @@ NodeType = Literal[
     "Period",
     "SourceSegment",
 ]
+
+NODE_TYPE_VALUES: tuple[str, ...] = get_args(NodeType)
 
 
 class Segment(BaseModel):

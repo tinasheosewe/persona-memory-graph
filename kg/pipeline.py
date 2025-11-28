@@ -1,3 +1,6 @@
+
+from __future__ import annotations
+
 import json
 import logging
 import re
@@ -172,7 +175,8 @@ class GraphBuilder:
         work_meta: Optional[dict] = None,
         character: Optional[str] = None,
         location_prefix: Optional[str] = None,
-    ) -> GraphExtractionResult:
+        return_segments: bool = False,
+    ) -> GraphExtractionResult | tuple[GraphExtractionResult, List[Segment]]:
         segments = segment_text(
             text=text,
             work_name=work_name,
@@ -185,6 +189,8 @@ class GraphBuilder:
         self._upsert_nodes(extraction.nodes)
         self._upsert_edges(extraction.edges)
         self.session.commit()
+        if return_segments:
+            return extraction, segments
         return extraction
 
     def _ensure_work_node(self, work_name: str, work_meta: Optional[dict]) -> KGBasicNode:

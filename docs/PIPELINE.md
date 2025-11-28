@@ -29,11 +29,14 @@ This doc explains how the toolkit turns raw documents into a character-focused k
 8. **Commit**: single transaction via the provided SQLAlchemy session.
 
 ## Pipeline: document → graph (Neo4j/Memgraph)
-1. Call `CypherGraphBuilder.build_from_text(text, work_name, character=...)`.
-2. Segments: same as above.
-3. `Work` + `SourceSegment` nodes: `MERGE` a `Work` node and `HAS_SEGMENT` relations to `SourceSegment` nodes (properties: `id`, `content`, `location`, `meta`).
-4. Nodes: `MERGE` by `name` with a label matching `type` (e.g., `:Character`, `:Event`). Properties: `alias_names`, `summary`, `meta`, `source_ids`.
-5. Edges: `MERGE` relationships using sanitized uppercase relation names (e.g., `OPPOSES`, `REFERENCES`), updating `description`, `weight`, `source_ids`.
+Two options:
+- **Single extraction, dual write (recommended)**: run `GraphBuilder.build_from_text(..., return_segments=True)` to get `(extraction, segments)`, then call `CypherGraphBuilder.project(segments, extraction, work_name, work_meta)`. This avoids a second LLM call and keeps Postgres canonical.
+- **Graph-only write**: call `CypherGraphBuilder.build_from_text(text, work_name, character=...)` to segment, extract, and push directly to the graph.
+
+What `CypherGraphBuilder` writes:
+1. `Work` + `SourceSegment` nodes: `MERGE` a `Work` node and `HAS_SEGMENT` relationships to `SourceSegment` nodes (properties: `id`, `content`, `location`, `meta`).
+2. Entity nodes: `MERGE` by `name` with a label matching `type` (e.g., `:Character`, `:Event`). Properties: `alias_names`, `summary`, `meta`, `source_ids`.
+3. Edges: `MERGE` relationships using sanitized uppercase relation names (e.g., `OPPOSES`, `REFERENCES`), updating `description`, `weight`, `source_ids`.
 
 ## LLM extraction contract
 `LLMExtractor` sends a prompt with numbered segments and expects JSON:

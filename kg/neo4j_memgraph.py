@@ -30,6 +30,24 @@ class CypherGraphBuilder:
         self.driver = driver
         self.extractor = extractor
 
+    def project(
+        self,
+        segments: Iterable[Segment],
+        extraction: GraphExtractionResult,
+        work_name: str,
+        work_meta: Optional[dict] = None,
+    ) -> GraphExtractionResult:
+        """
+        Store provided segments and upsert extracted nodes/edges.
+
+        Use this when you already ran extraction (e.g., via GraphBuilder) and want
+        to publish to Neo4j/Memgraph without a second LLM call.
+        """
+        self._store_segments(work_name, work_meta, segments)
+        self._merge_nodes(extraction.nodes)
+        self._merge_edges(extraction.edges)
+        return extraction
+
     def build_from_text(
         self,
         text: str,

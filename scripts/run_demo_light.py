@@ -13,6 +13,7 @@ Usage:
 import argparse
 import os
 from pathlib import Path
+from typing import Optional
 
 try:
     from pypdf import PdfReader
@@ -20,6 +21,18 @@ except Exception:  # pragma: no cover - pypdf is optional
     PdfReader = None
 
 from kg.pipeline import DEFAULT_RELATIONS, LLMExtractor, MockExtractor, segment_text
+
+
+def format_source(segment_lookup, source_id: Optional[str]) -> str:
+    if not source_id:
+        return "(none)"
+    segment = segment_lookup.get(source_id)
+    if not segment:
+        return source_id
+    snippet = segment.content.strip()
+    if len(snippet) > 160:
+        snippet = snippet[:160].rstrip() + "..."
+    return f"{source_id}: {snippet}"
 
 
 def read_text(path: Path) -> str:
@@ -76,6 +89,7 @@ def main():
 
     work_name = args.work_name or source_path.stem
     segments = segment_text(content, work_name=work_name)
+    segment_lookup = {segment.id: segment for segment in segments}
     if args.use_llm:
         from openai import OpenAI
 
@@ -98,14 +112,18 @@ def main():
 
     print("\nNodes:")
     for node in extraction.nodes:
-        print(f"- {node.type}: {node.name} (aliases={node.alias_names}, src={node.source_id})")
+        source_display = format_source(segment_lookup, node.source_id)
+        print(f"- {node.type}: {node.name} (aliases={node.alias_names})")
+        print(f"    source: {source_display}")
 
     print("\nEdges:")
     for edge in extraction.edges:
+        source_display = format_source(segment_lookup, edge.source_id)
         print(
             f"- {edge.from_name} -[{edge.relation}]-> {edge.to_name} "
-            f"(src={edge.source_id}, conf={edge.confidence})"
+            f"(conf={edge.confidence})"
         )
+        print(f"    source: {source_display}")
 
 
 if __name__ == "__main__":

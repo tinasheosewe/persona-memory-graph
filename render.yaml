@@ -30,6 +30,12 @@ services:
       # Set this manually in the Render dashboard for production LLM calls.
       - key: OPENAI_API_KEY
         sync: false
+      - key: NEO4J_URI
+        sync: false
+      - key: NEO4J_USER
+        sync: false
+      - key: NEO4J_PASSWORD
+        sync: false
 
 databases:
   - name: character-kg-db

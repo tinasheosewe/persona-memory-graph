@@ -32,6 +32,7 @@ class NodeCandidate(BaseModel):
     alias_names: List[str] = Field(default_factory=list)
     meta: Dict = Field(default_factory=dict)
     source_id: Optional[str] = None
+    character_key: Optional[str] = None
 
 
 class EdgeCandidate(BaseModel):
@@ -42,3 +43,4 @@ class EdgeCandidate(BaseModel):
     source_id: Optional[str] = None
     confidence: Optional[float] = None
     meta: Dict = Field(default_factory=dict)
+    character_key: Optional[str] = None

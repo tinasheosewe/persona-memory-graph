@@ -56,7 +56,7 @@ class TestPipeline(unittest.TestCase):
         extractor = MockExtractor()
         builder = RecordingBuilder(extractor=extractor)
         text = "A short paragraph about duty."
-        builder.build_from_text(text, work_name="Letters", character="Marcus")
+        builder.build_from_text(text, work_name="Letters", character="Marcus", character_key="default")
         self.assertTrue(builder.saved_segments, "Segments should be stored")
         self.assertTrue(builder.saved_nodes, "Nodes should be upserted")
         self.assertTrue(builder.saved_edges, "Edges should be upserted")
@@ -107,7 +107,7 @@ class RecordingBuilder(GraphBuilder):
         self.saved_edges = []
         super().__init__(session=type("S", (), {"commit": lambda self: None})(), extractor=extractor)
 
-    def _ensure_work_node(self, work_name, work_meta):
+    def _ensure_work_node(self, work_name, work_meta, character_key):
         return StubWork(id="work-1", name=work_name)
 
     def _store_segments(self, segments, work_id):

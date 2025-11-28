@@ -23,6 +23,7 @@ class KGBasicNode(Base):
     __tablename__ = "kg_nodes"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    character_key = Column(String, nullable=False, default="default")
     type = Column(
         String,
         nullable=False,
@@ -59,6 +60,7 @@ class KGEdge(Base):
     __tablename__ = "kg_edges"
 
     id = Column(BigInteger, primary_key=True, autoincrement=True)
+    character_key = Column(String, nullable=False, default="default")
     from_id = Column(UUID(as_uuid=True), ForeignKey("kg_nodes.id", ondelete="CASCADE"))
     to_id = Column(UUID(as_uuid=True), ForeignKey("kg_nodes.id", ondelete="CASCADE"))
     relation = Column(String, nullable=False)

@@ -476,16 +476,24 @@ class GraphBuilder:
         character: Optional[str] = None,
         location_prefix: Optional[str] = None,
         return_segments: bool = False,
+        character_key: str = "default",
     ) -> GraphExtractionResult | tuple[GraphExtractionResult, List[Segment]]:
         segments = segment_text(
             text=text,
             work_name=work_name,
             location_prefix=location_prefix,
         )
-        work_node = self._ensure_work_node(work_name, work_meta)
+        work_node = self._ensure_work_node(work_name, work_meta, character_key)
         self._store_segments(segments, work_node.id)
 
         extraction = self.extractor.extract(segments, character=character)
+        # stamp character_key on candidates if missing
+        for n in extraction.nodes:
+            if not n.character_key:
+                n.character_key = character_key
+        for e in extraction.edges:
+            if not e.character_key:
+                e.character_key = character_key
         self._upsert_nodes(extraction.nodes)
         self._upsert_edges(extraction.edges)
         self.session.commit()
@@ -493,16 +501,17 @@ class GraphBuilder:
             return extraction, segments
         return extraction
 
-    def _ensure_work_node(self, work_name: str, work_meta: Optional[dict]) -> KGBasicNode:
+    def _ensure_work_node(self, work_name: str, work_meta: Optional[dict], character_key: str) -> KGBasicNode:
         existing = self.session.scalar(
             select(KGBasicNode).where(
                 func.lower(KGBasicNode.name) == work_name.lower(),
                 KGBasicNode.type == "Work",
+                KGBasicNode.character_key == character_key,
             )
         )
         if existing:
             return existing
-        node = KGBasicNode(name=work_name, type="Work", meta=work_meta or {})
+        node = KGBasicNode(name=work_name, type="Work", meta=work_meta or {}, character_key=character_key)
         self.session.add(node)
         self.session.flush()
         return node
@@ -524,11 +533,12 @@ class GraphBuilder:
 
     def _upsert_nodes(self, nodes: Iterable[NodeCandidate]) -> None:
         for candidate in nodes:
-            node = self._get_node_by_name_and_type(candidate.name, candidate.type)
+            node = self._get_node_by_name_and_type(candidate.name, candidate.type, candidate.character_key or "default")
             if not node:
                 node = KGBasicNode(
                     name=candidate.name,
                     type=candidate.type,
+                    character_key=candidate.character_key or "default",
                     alias_names=candidate.alias_names,
                     summary=candidate.summary,
                     meta=candidate.meta,
@@ -550,10 +560,10 @@ class GraphBuilder:
         name_cache = {}
         for edge in edges:
             from_node = name_cache.get(edge.from_name) or self._get_node_by_name(
-                edge.from_name
+                edge.from_name, edge.character_key or "default"
             )
             to_node = name_cache.get(edge.to_name) or self._get_node_by_name(
-                edge.to_name
+                edge.to_name, edge.character_key or "default"
             )
             if not from_node or not to_node:
                 logger.warning("Skipping edge; missing nodes %s -> %s", edge.from_name, edge.to_name)
@@ -562,6 +572,7 @@ class GraphBuilder:
             name_cache[edge.to_name] = to_node
             existing = self.session.scalar(
                 select(KGEdge).where(
+                    KGEdge.character_key == (edge.character_key or "default"),
                     KGEdge.from_id == from_node.id,
                     KGEdge.to_id == to_node.id,
                     KGEdge.relation == edge.relation,
@@ -579,6 +590,7 @@ class GraphBuilder:
                 continue
             self.session.add(
                 KGEdge(
+                    character_key=edge.character_key or "default",
                     from_id=from_node.id,
                     to_id=to_node.id,
                     relation=edge.relation,
@@ -590,16 +602,20 @@ class GraphBuilder:
         self.session.flush()
 
     def _get_node_by_name_and_type(
-        self, name: str, node_type: str
+        self, name: str, node_type: str, character_key: str
     ) -> Optional[KGBasicNode]:
         return self.session.scalar(
             select(KGBasicNode).where(
                 func.lower(KGBasicNode.name) == name.lower(),
                 KGBasicNode.type == node_type,
+                KGBasicNode.character_key == character_key,
             )
         )
 
-    def _get_node_by_name(self, name: str) -> Optional[KGBasicNode]:
+    def _get_node_by_name(self, name: str, character_key: str) -> Optional[KGBasicNode]:
         return self.session.scalar(
-            select(KGBasicNode).where(func.lower(KGBasicNode.name) == name.lower())
+            select(KGBasicNode).where(
+                func.lower(KGBasicNode.name) == name.lower(),
+                KGBasicNode.character_key == character_key,
+            )
         )

@@ -111,6 +111,16 @@ class LLMExtractor(BaseExtractor):
         self.client = client
         self.model = model
         self.relations = relations or []
+        self.allowed_types = {
+            "Character",
+            "Person",
+            "Event",
+            "Concept",
+            "Work",
+            "Place",
+            "Period",
+            "SourceSegment",
+        }
 
     def extract(
         self, segments: List[Segment], character: Optional[str] = None
@@ -123,8 +133,8 @@ class LLMExtractor(BaseExtractor):
         )
         content = response.choices[0].message.content
         data = json.loads(content)
-        nodes = [NodeCandidate(**node) for node in data.get("nodes", [])]
-        edges = [EdgeCandidate(**edge) for edge in data.get("edges", [])]
+        nodes = [NodeCandidate(**node) for node in self._normalize_nodes(data.get("nodes", []))]
+        edges = [EdgeCandidate(**edge) for edge in self._normalize_edges(data.get("edges", []))]
         return GraphExtractionResult(nodes=nodes, edges=edges)
 
     def _build_prompt(
@@ -135,14 +145,57 @@ class LLMExtractor(BaseExtractor):
             text_blocks.append(
                 f"[{segment.id}] ({segment.location}) {segment.content}"
             )
-        relation_vocab = ", ".join(self.relations) if self.relations else "see schema"
+        relation_vocab = ", ".join(self.relations) if self.relations else "RELATES_TO,BELIEVES_IN,OPPOSES,INFLUENCED_BY,REFERENCES,CONTRADICTS,SUPPORTS"
+        node_types = ", ".join(sorted(self.allowed_types))
         return (
             "Extract graph facts about the character and related entities.\n"
             f"Known character focus: {character or 'none specified'}.\n"
-            "Return JSON with keys nodes and edges.\n"
-            f"Relations must be one of: {relation_vocab}.\n"
+            "Return strictly valid JSON with top-level keys 'nodes' and 'edges'.\n"
+            "nodes: array of {name: string, type: one of [" + node_types + "], summary?: string, alias_names?: string[], meta?: object, source_id?: string}\n"
+            "edges: array of {from_name: string, to_name: string, relation: one of [" + relation_vocab + "], description?: string, source_id?: string, confidence?: number}\n"
+            "Do not invent types outside the allowed list. Always include from_name and to_name for edges. Use the provided relation vocabulary only.\n"
             "Text segments:\n" + "\n".join(text_blocks)
         )
+
+    def _normalize_nodes(self, raw_nodes: list) -> List[dict]:
+        normalized = []
+        for node in raw_nodes:
+            node_copy = dict(node)
+            if "name" not in node_copy and "id" in node_copy:
+                node_copy["name"] = node_copy["id"]
+            if "type" in node_copy and isinstance(node_copy["type"], str):
+                tval = node_copy["type"].strip()
+                tcap = tval[:1].upper() + tval[1:]
+                if tcap not in self.allowed_types:
+                    raise ValueError(f"LLM returned unsupported node type '{tval}'")
+                node_copy["type"] = tcap
+            normalized.append(node_copy)
+        return normalized
+
+    def _normalize_edges(self, raw_edges: list) -> List[dict]:
+        normalized_edges = []
+        for edge in raw_edges:
+            ecopy = dict(edge)
+            if "from_name" not in ecopy:
+                for key in ("source", "from", "actor"):
+                    if key in ecopy:
+                        ecopy["from_name"] = ecopy[key]
+                        break
+            if "to_name" not in ecopy:
+                for key in ("target", "to", "object"):
+                    if key in ecopy:
+                        ecopy["to_name"] = ecopy[key]
+                        break
+            if "relation" in ecopy and isinstance(ecopy["relation"], str):
+                ecopy["relation"] = ecopy["relation"].upper()
+            if self.relations and ecopy.get("relation") not in self.relations:
+                raise ValueError(f"LLM returned unsupported relation '{ecopy.get('relation')}'")
+            if "confidence" not in ecopy and "weight" in ecopy:
+                ecopy["confidence"] = ecopy["weight"]
+            if "from_name" not in ecopy or "to_name" not in ecopy:
+                raise ValueError(f"LLM returned edge missing endpoints: {ecopy}")
+            normalized_edges.append(ecopy)
+        return normalized_edges
 
 
 class MockExtractor(BaseExtractor):

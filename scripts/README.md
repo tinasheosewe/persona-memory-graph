@@ -31,7 +31,31 @@ python scripts/run_demo_light.py --text test_files/demo_story.txt --character "A
 # or with a PDF:
 python scripts/run_demo_light.py --pdf test_files/demo_story.pdf --character "Aurelia Maren"
 ```
-This uses `MockExtractor`, segments the text, and prints segments + extracted nodes/edges without touching a database. Install `pypdf` if you want PDF input.
+This uses `MockExtractor` by default, segments the text, and prints segments + extracted nodes/edges without touching a database. Install `pypdf` if you want PDF input.
+
+### Using the LLM extractor (OpenAI)
+Set your key and optionally a model, then pass `--use-llm`:
+```bash
+export OPENAI_API_KEY=sk-...
+export DEMO_LLM_MODEL=gpt-4o-mini   # optional
+python scripts/run_demo_light.py --text test_files/demo_story.txt --character "Aurelia Maren" --use-llm
+```
+The relation vocabulary can be overridden via `--relations REL1 REL2 ...`.
+
+### One-shot script
+`scripts/run_demo.sh` installs deps, runs tests, and runs the lightweight demo.
+Defaults to text input and `MockExtractor`.
+```bash
+./scripts/run_demo.sh
+```
+To use the LLM demo:
+```bash
+OPENAI_API_KEY=sk-... USE_LLM=1 ./scripts/run_demo.sh
+```
+To switch to the PDF path:
+```bash
+USE_PDF=1 ./scripts/run_demo.sh
+```
 
 ## Switching to LLM extraction
 Edit `scripts/pdf_demo.py`:

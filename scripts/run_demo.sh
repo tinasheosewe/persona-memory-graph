@@ -15,6 +15,13 @@ PDF_SOURCE_DEFAULT="$ROOT/test_files/demo_story.pdf"
 CHARACTER="${CHARACTER:-Aurelia Maren}"
 WORK_NAME="${WORK_NAME:-Demo Story}"
 
+# Load environment from .env if present (for OPENAI_API_KEY / DEMO_LLM_MODEL)
+if [[ -f "$ROOT/.env" ]]; then
+  set -a
+  source "$ROOT/.env"
+  set +a
+fi
+
 if [[ ! -d "$VENV" ]]; then
   echo "Creating virtualenv at $VENV"
   python3 -m venv "$VENV"
@@ -70,10 +77,20 @@ echo "Running tests..."
 python -m unittest discover -v
 
 echo "Running lightweight demo..."
+LLM_FLAG=()
+USE_LLM="${USE_LLM:-${OPENAI_API_KEY:+1}}"
+if [[ "$USE_LLM" == "1" ]]; then
+  if [[ -z "${OPENAI_API_KEY:-}" ]]; then
+    echo "OPENAI_API_KEY is required when USE_LLM=1" >&2
+    exit 1
+  fi
+  LLM_FLAG=(--use-llm --model "${LLM_MODEL:-gpt-4o-mini}")
+fi
+
 if [[ "$USE_PDF" == "1" ]]; then
-  python "$ROOT/scripts/run_demo_light.py" --pdf "$PDF_PATH" --character "$CHARACTER" --work-name "$WORK_NAME"
+  python "$ROOT/scripts/run_demo_light.py" --pdf "$PDF_PATH" --character "$CHARACTER" --work-name "$WORK_NAME" "${LLM_FLAG[@]}"
 else
-  python "$ROOT/scripts/run_demo_light.py" --text "$TXT_SOURCE" --character "$CHARACTER" --work-name "$WORK_NAME"
+  python "$ROOT/scripts/run_demo_light.py" --text "$TXT_SOURCE" --character "$CHARACTER" --work-name "$WORK_NAME" "${LLM_FLAG[@]}"
 fi
 
 echo "Demo complete."

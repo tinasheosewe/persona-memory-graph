@@ -100,3 +100,12 @@ builder.build_from_text(text, work_name="Collected Letters", character="Marcus")
 
 ## Need more detail?
 See `docs/PIPELINE.md` for step-by-step architecture, the LLM JSON contract, and example SQL/Cypher queries.
+
+## Deploying to Render
+- A `render.yaml` is included. It provisions:
+  - A Postgres instance (`character-kg-db`) and a web service running FastAPI (`uvicorn app.main:app`).
+  - `DATABASE_URL` is wired from the managed Postgres. `LLM_MODEL` defaults to `gpt-4o-mini`. Set `OPENAI_API_KEY` in the Render dashboard if you want LLM-backed extraction/answers; leave unset to use the mock extractor.
+- Deploy steps:
+  1) Push to your repo with `render.yaml`.
+  2) Create a new “Blueprint” on Render pointing to the repo; Render builds with `pip install -r requirements.txt` and starts with `uvicorn app.main:app --host 0.0.0.0 --port $PORT`.
+  3) After deploy, call `POST /ingest-book` (multipart file upload) and `POST /query` with `prompt` (+ optional `character`). Healthcheck: `GET /health`.

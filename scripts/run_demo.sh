@@ -1,26 +1,19 @@
 #!/usr/bin/env bash
-# One-shot setup and demo run for the character KG.
+# One-shot setup and lightweight demo (no Postgres required).
 # - creates/uses .venv
-# - installs deps (plus fpdf2 to make a PDF from the sample text)
+# - installs deps (plus fpdf2 to make a PDF from the sample text if desired)
 # - runs unit tests
-# - ingests the sample PDF into Postgres and prints nodes/edges
+# - runs the lightweight demo to print segments/nodes/edges (using text by default)
 
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
+ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 VENV="$ROOT/.venv"
-PDF_SOURCE_DEFAULT="$ROOT/test_files/demo_story.pdf"
 TXT_SOURCE="$ROOT/test_files/demo_story.txt"
+PDF_SOURCE_DEFAULT="$ROOT/test_files/demo_story.pdf"
 CHARACTER="${CHARACTER:-Aurelia Maren}"
 WORK_NAME="${WORK_NAME:-Demo Story}"
-
-if [[ -z "${DATABASE_URL:-}" ]]; then
-  echo "DATABASE_URL is not set. Please export it (e.g., postgresql+psycopg2://user:pass@localhost:5432/kg) and re-run." >&2
-  exit 1
-fi
-
-echo "Using DATABASE_URL=$DATABASE_URL"
-echo "Character: $CHARACTER"
 
 if [[ ! -d "$VENV" ]]; then
   echo "Creating virtualenv at $VENV"
@@ -28,23 +21,38 @@ if [[ ! -d "$VENV" ]]; then
 fi
 
 source "$VENV/bin/activate"
+# Ensure local package is importable
+export PYTHONPATH="$ROOT:${PYTHONPATH:-}"
 
 echo "Installing dependencies..."
 pip install -q --upgrade pip
 pip install -q -r "$ROOT/requirements.txt" fpdf2
 
+# Prefer text demo; generate PDF only if requested
+USE_PDF="${USE_PDF:-0}"
 PDF_PATH="${PDF_PATH:-$PDF_SOURCE_DEFAULT}"
-if [[ ! -f "$PDF_PATH" ]]; then
-  echo "Generating PDF from $TXT_SOURCE -> $PDF_PATH"
-  python - <<'PY'
+
+if [[ "$USE_PDF" == "1" ]]; then
+  if [[ ! -f "$PDF_PATH" ]]; then
+    echo "Generating PDF from $TXT_SOURCE -> $PDF_PATH"
+    DEMO_ROOT="$ROOT" python - <<'PY'
+import os
 from pathlib import Path
 from fpdf import FPDF
 
-root = Path(__file__).resolve().parent.parent
+root = Path(os.environ["DEMO_ROOT"])
 txt = root / "test_files" / "demo_story.txt"
 pdf_path = root / "test_files" / "demo_story.pdf"
+txt.parent.mkdir(parents=True, exist_ok=True)
+if not txt.exists():
+    raise FileNotFoundError(f"Missing text source: {txt}")
 content = txt.read_text(encoding="utf-8")
-
+# Normalize curly quotes to avoid font issues with built-in fonts
+content = (
+    content.replace("“", '"')
+    .replace("”", '"')
+    .replace("’", "'")
+)
 pdf = FPDF()
 pdf.add_page()
 pdf.set_font("Helvetica", size=12)
@@ -53,14 +61,19 @@ for line in content.splitlines():
 pdf.output(str(pdf_path))
 print(f"Wrote {pdf_path}")
 PY
-else
-  echo "Using existing PDF at $PDF_PATH"
+  else
+    echo "Using existing PDF at $PDF_PATH"
+  fi
 fi
 
 echo "Running tests..."
 python -m unittest discover -v
 
-echo "Running PDF demo..."
-python "$ROOT/scripts/pdf_demo.py" --pdf "$PDF_PATH" --character "$CHARACTER" --work-name "$WORK_NAME"
+echo "Running lightweight demo..."
+if [[ "$USE_PDF" == "1" ]]; then
+  python "$ROOT/scripts/run_demo_light.py" --pdf "$PDF_PATH" --character "$CHARACTER" --work-name "$WORK_NAME"
+else
+  python "$ROOT/scripts/run_demo_light.py" --text "$TXT_SOURCE" --character "$CHARACTER" --work-name "$WORK_NAME"
+fi
 
 echo "Demo complete."

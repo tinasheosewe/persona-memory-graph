@@ -24,6 +24,15 @@ Options:
 3. Stores nodes/edges/segments in Postgres.
 4. Prints all nodes and edges with their types, aliases, and source IDs.
 
+## Lightweight demo (no database)
+Run:
+```bash
+python scripts/run_demo_light.py --text test_files/demo_story.txt --character "Aurelia Maren"
+# or with a PDF:
+python scripts/run_demo_light.py --pdf test_files/demo_story.pdf --character "Aurelia Maren"
+```
+This uses `MockExtractor`, segments the text, and prints segments + extracted nodes/edges without touching a database. Install `pypdf` if you want PDF input.
+
 ## Switching to LLM extraction
 Edit `scripts/pdf_demo.py`:
 ```python

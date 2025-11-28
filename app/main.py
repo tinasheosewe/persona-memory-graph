@@ -37,12 +37,16 @@ app = FastAPI(title="Character KG API", version="0.1.0")
 
 # --- DB session dependency ----------------------------------------------------
 DATABASE_URL = os.getenv("DATABASE_URL")
-if not DATABASE_URL:
-    raise RuntimeError("DATABASE_URL is required for the API")
-ENGINE, SessionLocal = create_engine_and_session(DATABASE_URL)
+ENGINE = None
+SessionLocal = None
+if DATABASE_URL:
+    ENGINE, SessionLocal = create_engine_and_session(DATABASE_URL)
 
 
 def get_session():
+    if SessionLocal is None:
+        yield None
+        return
     session = SessionLocal()
     try:
         yield session
@@ -86,10 +90,11 @@ def choose_extractor():
 
 
 neo4j_builder: Optional[CypherGraphBuilder] = None
+neo4j_driver = None
 
 
 def get_cypher_builder() -> Optional[CypherGraphBuilder]:
-    global neo4j_builder
+    global neo4j_builder, neo4j_driver
     if neo4j_builder:
         return neo4j_builder
     uri = os.getenv("NEO4J_URI")
@@ -101,8 +106,8 @@ def get_cypher_builder() -> Optional[CypherGraphBuilder]:
         from neo4j import GraphDatabase
     except Exception:
         return None
-    driver = GraphDatabase.driver(uri, auth=(user, password))
-    neo4j_builder = CypherGraphBuilder(driver=driver, extractor=MockExtractor())
+    neo4j_driver = GraphDatabase.driver(uri, auth=(user, password))
+    neo4j_builder = CypherGraphBuilder(driver=neo4j_driver, extractor=MockExtractor())
     return neo4j_builder
 
 
@@ -168,7 +173,48 @@ def fetch_context(session: Session, character: Optional[str], prompt: str, chara
     return nodes, edges
 
 
-def build_llm_answer(prompt: str, nodes: List[KGBasicNode], edges: List[KGEdge]) -> Optional[str]:
+def fetch_context_neo4j(character: Optional[str], prompt: str, character_key: str):
+    if not neo4j_driver:
+        return [], []
+    name_filter = character or resolve_character(prompt, None)
+    node_query = """
+    MATCH (n {character_key: $ck})
+    WHERE $name IS NULL OR n.name CONTAINS $name
+    RETURN n LIMIT 200
+    """
+    edge_query = """
+    MATCH (a {character_key: $ck})-[r]->(b {character_key: $ck})
+    WHERE ($name IS NULL OR a.name CONTAINS $name OR b.name CONTAINS $name)
+    RETURN a.name AS from_name, b.name AS to_name, type(r) AS relation, r.description AS description, r.meta AS meta, r.source_ids AS source_ids LIMIT 300
+    """
+    with neo4j_driver.session() as session:
+        nodes = [
+            {
+                "id": str(record["n"].id),
+                "type": record["n"].get("type"),
+                "name": record["n"].get("name"),
+                "summary": record["n"].get("summary"),
+                "aliases": record["n"].get("alias_names", []),
+                "character_key": record["n"].get("character_key"),
+            }
+            for record in session.run(node_query, ck=character_key, name=name_filter)
+        ]
+        edges = [
+            {
+                "from": record["from_name"],
+                "to": record["to_name"],
+                "relation": record["relation"],
+                "description": record["description"],
+                "meta": record["meta"],
+                "source_ids": record["source_ids"],
+                "character_key": character_key,
+            }
+            for record in session.run(edge_query, ck=character_key, name=name_filter)
+        ]
+    return nodes, edges
+
+
+def build_llm_answer_from_dicts(prompt: str, nodes: List[dict], edges: List[dict]) -> Optional[str]:
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
         return None
@@ -178,15 +224,13 @@ def build_llm_answer(prompt: str, nodes: List[KGBasicNode], edges: List[KGEdge])
     model = os.getenv("LLM_MODEL", "gpt-4o-mini")
 
     node_lines = [
-        f"[{n.type}] {n.name}: {n.summary or ''} (aliases={n.alias_names or []})" for n in nodes
+        f"[{n.get('type')}] {n.get('name')}: {n.get('summary') or ''} (aliases={n.get('aliases') or []})"
+        for n in nodes
     ]
-    edge_lines = []
-    id_to_name = {n.id: n.name for n in nodes}
-    for e in edges:
-        edge_lines.append(
-            f"{id_to_name.get(e.from_id, e.from_id)} -[{e.relation}]-> {id_to_name.get(e.to_id, e.to_id)} "
-            f"desc={e.description or ''} meta={e.meta or {}}"
-        )
+    edge_lines = [
+        f"{e.get('from')} -[{e.get('relation')}]-> {e.get('to')} desc={e.get('description') or ''} meta={e.get('meta') or {}}"
+        for e in edges
+    ]
     context = "Nodes:\n" + "\n".join(node_lines) + "\nEdges:\n" + "\n".join(edge_lines)
     message = (
         "You are a graph-aware assistant. Use only the provided nodes/edges to answer concisely.\n"
@@ -206,25 +250,51 @@ def ingest_book(
     character_key: str = "default",
     work_name: Optional[str] = None,
     file: UploadFile = File(...),
-    session: Session = Depends(get_session),
+    session: Optional[Session] = Depends(get_session),
 ):
     text = read_upload(file)
     work_label = work_name or file.filename or "Uploaded Work"
     extractor = choose_extractor()
     character_key = character_key or "default"
     cypher_builder = get_cypher_builder()
-    builder = GraphBuilder(session=session, extractor=extractor)
-    extraction, segments = builder.build_from_text(
-        text,
-        work_name=work_label,
-        character=character,
-        return_segments=True,
-        character_key=character_key,
-    )
     published = False
-    if cypher_builder:
-        cypher_builder.project(segments=segments, extraction=extraction, work_name=work_label, work_meta={})
-        published = True
+    if session:
+        builder = GraphBuilder(session=session, extractor=extractor)
+        extraction, segments = builder.build_from_text(
+            text,
+            work_name=work_label,
+            character=character,
+            return_segments=True,
+            character_key=character_key,
+        )
+        if cypher_builder:
+            cypher_builder.project(
+                segments=segments,
+                extraction=extraction,
+                work_name=work_label,
+                work_meta={"character_key": character_key},
+                character_key=character_key,
+            )
+            published = True
+    else:
+        # No DB; run extraction and publish to Neo4j only
+        segments = segment_text(text, work_name=work_label)
+        extraction = extractor.extract(segments, character=character)
+        for n in extraction.nodes:
+            if not n.character_key:
+                n.character_key = character_key
+        for e in extraction.edges:
+            if not e.character_key:
+                e.character_key = character_key
+        if cypher_builder:
+            cypher_builder.project(
+                segments=segments,
+                extraction=extraction,
+                work_name=work_label,
+                work_meta={"character_key": character_key},
+                character_key=character_key,
+            )
+            published = True
     return IngestResponse(
         work_name=work_label,
         character=character,
@@ -238,31 +308,38 @@ def ingest_book(
 @app.post("/query", response_model=QueryResponse)
 def query_graph(body: QueryRequest, session: Session = Depends(get_session)):
     focus_character = resolve_character(body.prompt, body.character)
-    nodes, edges = fetch_context(session, focus_character, body.prompt, character_key=body.character_key)
-    answer = build_llm_answer(body.prompt, nodes, edges)
-    nodes_out = [
-        {
-            "id": str(n.id),
-            "type": n.type,
-            "name": n.name,
-            "summary": n.summary,
-            "aliases": n.alias_names,
-            "character_key": n.character_key,
-        }
-        for n in nodes
-    ]
-    id_to_name = {n["id"]: n["name"] for n in nodes_out}
-    edges_out = [
-        {
-            "id": e.id,
-            "from": id_to_name.get(str(e.from_id), str(e.from_id)),
-            "to": id_to_name.get(str(e.to_id), str(e.to_id)),
-            "relation": e.relation,
-            "description": e.description,
-            "meta": e.meta,
-        }
-        for e in edges
-    ]
+    nodes_out: List[dict] = []
+    edges_out: List[dict] = []
+    if neo4j_driver:
+        nodes_out, edges_out = fetch_context_neo4j(focus_character, body.prompt, character_key=body.character_key)
+    elif session:
+        nodes, edges = fetch_context(session, focus_character, body.prompt, character_key=body.character_key)
+        nodes_out = [
+            {
+                "id": str(n.id),
+                "type": n.type,
+                "name": n.name,
+                "summary": n.summary,
+                "aliases": n.alias_names,
+                "character_key": n.character_key,
+            }
+            for n in nodes
+        ]
+        id_to_name = {n["id"]: n["name"] for n in nodes_out}
+        edges_out = [
+            {
+                "id": e.id,
+                "from": id_to_name.get(str(e.from_id), str(e.from_id)),
+                "to": id_to_name.get(str(e.to_id), str(e.to_id)),
+                "relation": e.relation,
+                "description": e.description,
+                "meta": e.meta,
+            }
+            for e in edges
+        ]
+    else:
+        nodes_out, edges_out = [], []
+    answer = build_llm_answer_from_dicts(body.prompt, nodes_out, edges_out)
     return QueryResponse(answer=answer, nodes=nodes_out, edges=edges_out, prompt_used=body.prompt)
 
 

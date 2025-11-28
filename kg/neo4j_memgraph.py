@@ -113,10 +113,9 @@ class CypherGraphBuilder:
         tx.run(
             """
             MERGE (w:Work {name: $name, character_key: $character_key})
-            ON CREATE SET w.type='Work', w.meta=$meta
+            ON CREATE SET w.type='Work'
             """,
             name=work_name,
-            meta=work_meta,
             character_key=character_key,
         )
 
@@ -127,14 +126,13 @@ class CypherGraphBuilder:
             MERGE (w:Work {name: $work_name, character_key: $character_key})
             ON CREATE SET w.type='Work'
             MERGE (s:SourceSegment {id: $id, character_key: $character_key})
-            ON CREATE SET s.content=$content, s.location=$location, s.meta=$meta
+            ON CREATE SET s.content=$content, s.location=$location
             MERGE (w)-[:HAS_SEGMENT {character_key: $character_key}]->(s)
             """,
             work_name=work_name,
             id=seg.id,
             content=seg.content,
             location=seg.location,
-            meta=seg.meta,
             character_key=character_key,
         )
 
@@ -154,10 +152,9 @@ class CypherGraphBuilder:
         tx.run(
             f"""
             MERGE (n:{label} {{name: $name, character_key: $character_key}})
-            ON CREATE SET n.type=$type, n.alias_names=$alias_names, n.summary=$summary, n.meta=$meta, n.source_ids=CASE WHEN $source_id IS NULL THEN [] ELSE [$source_id] END
+            ON CREATE SET n.type=$type, n.alias_names=$alias_names, n.summary=$summary, n.source_ids=CASE WHEN $source_id IS NULL THEN [] ELSE [$source_id] END
             ON MATCH SET
                 n.alias_names = coalesce(n.alias_names, []) + $alias_names,
-                n.meta = coalesce(n.meta, {{}}) + $meta,
                 n.summary = coalesce(n.summary, $summary),
                 n.source_ids = coalesce(n.source_ids, []) + CASE WHEN $source_id IS NULL THEN [] ELSE [$source_id] END,
                 n.character_key = $character_key
@@ -166,7 +163,6 @@ class CypherGraphBuilder:
             type=node.type,
             alias_names=node.alias_names,
             summary=node.summary,
-            meta=node.meta,
             source_id=node.source_id,
             character_key=character_key,
         )
@@ -188,12 +184,11 @@ class CypherGraphBuilder:
             f"""
             MATCH (a {{name: $from_name, character_key: $character_key}}), (b {{name: $to_name, character_key: $character_key}})
             MERGE (a)-[r:{rel_type} {{character_key: $character_key}}]->(b)
-            ON CREATE SET r.weight=$weight, r.description=$description, r.source_ids = CASE WHEN $source_id IS NULL THEN [] ELSE [$source_id] END, r.meta=$meta
+            ON CREATE SET r.weight=$weight, r.description=$description, r.source_ids = CASE WHEN $source_id IS NULL THEN [] ELSE [$source_id] END
             ON MATCH SET
                 r.weight = coalesce(r.weight, $weight),
                 r.description = coalesce(r.description, $description),
                 r.source_ids = coalesce(r.source_ids, []) + CASE WHEN $source_id IS NULL THEN [] ELSE [$source_id] END,
-                r.meta = coalesce(r.meta, {{}}) + $meta,
                 r.character_key = $character_key
             """,
             from_name=edge.from_name,
@@ -201,6 +196,5 @@ class CypherGraphBuilder:
             weight=edge.confidence,
             description=edge.description,
             source_id=edge.source_id,
-            meta=edge.meta,
             character_key=character_key,
         )

@@ -8,7 +8,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from typing import Dict, Iterable, List, Optional, Protocol, Sequence, Tuple
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, or_
 from sqlalchemy.orm import Session
 
 from .schema import KGBasicNode, KGEdge, SourceSegment
@@ -42,12 +42,19 @@ DEFAULT_RELATIONS: tuple[str, ...] = (
     "SUPPORTS",
     "INSPIRED_BY",
     "FOUNDED",
+    "EVIDENCED_BY",
+    "DERIVED_FROM",
+    "APPLIES_TO",
+    "EXCEPTION_OF",
 )
 
 
 class BaseExtractor(Protocol):
     def extract(
-        self, segments: List[Segment], character: Optional[str] = None
+        self,
+        segments: List[Segment],
+        character: Optional[str] = None,
+        existing_context: Optional[str] = None,
     ) -> GraphExtractionResult:
         ...
 
@@ -156,20 +163,20 @@ class LLMExtractor(BaseExtractor):
         self.max_workers = max(1, max_workers)
 
     def extract(
-        self, segments: List[Segment], character: Optional[str] = None
+        self, segments: List[Segment], character: Optional[str] = None, existing_context: Optional[str] = None
     ) -> GraphExtractionResult:
         if len(segments) <= self.batch_threshold:
-            return self._extract_single(segments, character)
-        return self._extract_batched(segments, character)
+            return self._extract_single(segments, character, existing_context)
+        return self._extract_batched(segments, character, existing_context)
 
     def _extract_single(
-        self, segments: List[Segment], character: Optional[str]
+        self, segments: List[Segment], character: Optional[str], existing_context: Optional[str]
     ) -> GraphExtractionResult:
-        payload = self._invoke_llm(segments, character)
+        payload = self._invoke_llm(segments, character, existing_context)
         return self._result_from_payload(payload)
 
     def _extract_batched(
-        self, segments: List[Segment], character: Optional[str]
+        self, segments: List[Segment], character: Optional[str], existing_context: Optional[str]
     ) -> GraphExtractionResult:
         batches = self._create_batches(segments)
         logger.info(
@@ -182,7 +189,7 @@ class LLMExtractor(BaseExtractor):
         batch_payloads: List[Optional[dict]] = [None] * len(batches)
         with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
             future_to_index = {
-                executor.submit(self._invoke_llm, batch, character): index
+                executor.submit(self._invoke_llm, batch, character, existing_context): index
                 for index, batch in enumerate(batches)
             }
             for future in as_completed(future_to_index):
@@ -195,8 +202,8 @@ class LLMExtractor(BaseExtractor):
         ]
         return self._merge_results(batch_results)
 
-    def _invoke_llm(self, segments: List[Segment], character: Optional[str]) -> dict:
-        prompt = self._build_prompt(segments, character)
+    def _invoke_llm(self, segments: List[Segment], character: Optional[str], existing_context: Optional[str]) -> dict:
+        prompt = self._build_prompt(segments, character, existing_context)
         response_format = self._build_response_format()
         response = self.client.chat.completions.create(
             model=self.model,
@@ -212,7 +219,7 @@ class LLMExtractor(BaseExtractor):
         return GraphExtractionResult(nodes=nodes, edges=edges)
 
     def _build_prompt(
-        self, segments: List[Segment], character: Optional[str] = None
+        self, segments: List[Segment], character: Optional[str] = None, existing_context: Optional[str] = None
     ) -> str:
         text_blocks = []
         for segment in segments:
@@ -225,19 +232,97 @@ class LLMExtractor(BaseExtractor):
             else ", ".join(DEFAULT_RELATIONS)
         )
         node_types = ", ".join(sorted(self.allowed_types))
+        context_section = ""
+        if existing_context:
+            context_section = "Existing graph context (do not duplicate; prefer canonical relations):\n" + existing_context + "\n\n"
+
         return (
-            "Extract graph facts about the character and related entities.\n"
+            "Extract both graph facts (entities and their relations) and episodic precedents/principles so the character/entity can be represented holistically.\n"
             f"Known character focus: {character or 'none specified'}.\n"
+            + context_section +
             "Return strictly valid JSON with top-level keys 'nodes' and 'edges'.\n"
             "nodes: array of {name: string, type: one of [" + node_types + "], summary?: string, alias_names?: string[], meta?: object, source_id?: string}\n"
+            "  - Episode nodes: set name to a short episode label; include meta.context, meta.tension, meta.response, meta.rationale, meta.outcome?, meta.confidence?, meta.canon_status?; attach source_id to the best supporting segment.\n"
+            "  - Principle nodes: set name/claim to the principle; include meta.scope, meta.support (episode ids/names or source ids), meta.confidence?, meta.exceptions?\n"
+            "  - Factual nodes (Character/Person/Organization/Event/etc.): capture summaries and aliases as usual.\n"
             "edges: array of {from_name: string, to_name: string, relation: one of [" + relation_vocab + "], description?: string, meta?: {nature?: string}, source_id?: string, confidence?: number}\n"
-            "Do not invent types outside the allowed list. Always include from_name and to_name for edges. Use the provided relation vocabulary only.\n"
+            "  - Link episodes to evidence with EVIDENCED_BY; link principles to supporting episodes with DERIVED_FROM or SUPPORTS; link exception episodes with EXCEPTION_OF; link principles to episodes they govern with APPLIES_TO.\n"
+            "  - Include factual relations between entities as needed (e.g., RELATES_TO, BELIEVES_IN, OPPOSES, REFERENCES).\n"
+            "Do not invent types outside the allowed list. Always include from_name and to_name for edges. Use the provided relation vocabulary only. Prefer to include source_id on nodes/edges for provenance.\n"
             "Text segments:\n" + "\n".join(text_blocks)
         )
 
     def _build_response_format(self) -> dict:
         """Structured output schema for OpenAI JSON schema mode."""
         relation_vocab = self.relations or list(DEFAULT_RELATIONS)
+        allowed_types = sorted(self.allowed_types)
+        generic_types = [t for t in allowed_types if t not in ("Episode", "Principle")]
+
+        episode_node_schema = {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string"},
+                "type": {"const": "Episode"},
+                "summary": {"type": "string"},
+                "alias_names": {"type": "array", "items": {"type": "string"}},
+                "meta": {
+                    "type": "object",
+                    "properties": {
+                        "context": {"type": "string", "description": "Situation attributes relevant to decision-making."},
+                        "tension": {"type": "string", "description": "Core dilemma, tradeoff, or uncertainty."},
+                        "response": {"type": "string", "description": "What the agent did/said/decided."},
+                        "rationale": {"type": "string", "description": "Why the response occurred (explicit/inferred)."},
+                        "outcome": {"type": "string"},
+                        "confidence": {"type": "number"},
+                        "canon_status": {"type": "string", "description": "canonical | provisional | disputed"},
+                    },
+                    "required": ["context", "response"],
+                    "additionalProperties": True,
+                },
+                "source_id": {"type": "string"},
+            },
+            "required": ["name", "type", "meta"],
+            "additionalProperties": False,
+        }
+
+        principle_node_schema = {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "Principle claim"},
+                "type": {"const": "Principle"},
+                "summary": {"type": "string"},
+                "alias_names": {"type": "array", "items": {"type": "string"}},
+                "meta": {
+                    "type": "object",
+                    "properties": {
+                        "scope": {"type": "string", "description": "Where/when it applies."},
+                        "support": {"type": "array", "items": {"type": "string"}, "description": "Episodes or source ids justifying the principle."},
+                        "exceptions": {"type": "array", "items": {"type": "string"}, "description": "Episodes where the principle fails."},
+                        "confidence": {"type": "number"},
+                    },
+                    "required": ["scope"],
+                    "additionalProperties": True,
+                },
+                "source_id": {"type": "string"},
+            },
+            "required": ["name", "type", "meta"],
+            "additionalProperties": False,
+        }
+
+        generic_node_schema = {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string"},
+                "type": {"type": "string", "enum": generic_types},
+                "summary": {"type": "string"},
+                "alias_names": {"type": "array", "items": {"type": "string"}},
+                "meta": {"type": "object", "additionalProperties": True},
+                "source_id": {"type": "string"},
+            },
+            "required": ["name", "type"],
+            "additionalProperties": False,
+        }
+
         return {
             "type": "json_schema",
             "json_schema": {
@@ -248,17 +333,11 @@ class LLMExtractor(BaseExtractor):
                         "nodes": {
                             "type": "array",
                             "items": {
-                                "type": "object",
-                                "properties": {
-                                    "name": {"type": "string"},
-                                    "type": {"type": "string", "enum": sorted(self.allowed_types)},
-                                    "summary": {"type": "string"},
-                                    "alias_names": {"type": "array", "items": {"type": "string"}},
-                                    "meta": {"type": "object", "additionalProperties": True},
-                                    "source_id": {"type": "string"},
-                                },
-                                "required": ["name", "type"],
-                                "additionalProperties": False,
+                                "oneOf": [
+                                    episode_node_schema,
+                                    principle_node_schema,
+                                    generic_node_schema,
+                                ],
                             },
                             "default": [],
                         },
@@ -325,6 +404,12 @@ class LLMExtractor(BaseExtractor):
                         break
             if "relation" in ecopy and isinstance(ecopy["relation"], str):
                 sanitized = re.sub(r"[^A-Za-z0-9]+", "_", ecopy["relation"]).strip("_").upper()
+                synonym_map = {
+                    "ENEMY_OF": "OPPOSES",
+                    "RIVAL_OF": "OPPOSES",
+                    "ALLY_OF": "SUPPORTS",
+                }
+                sanitized = synonym_map.get(sanitized, sanitized)
                 ecopy["relation"] = sanitized
             if self.relations and ecopy.get("relation") not in allowed_relations:
                 logger.warning("Skipping edge with unsupported relation: %s", ecopy.get("relation"))
@@ -428,7 +513,7 @@ class MockExtractor(BaseExtractor):
     """Simple extractor useful for tests; creates a Work node and SourceSegment edges."""
 
     def extract(
-        self, segments: List[Segment], character: Optional[str] = None
+        self, segments: List[Segment], character: Optional[str] = None, existing_context: Optional[str] = None
     ) -> GraphExtractionResult:
         nodes: List[NodeCandidate] = []
         edges: List[EdgeCandidate] = []
@@ -486,7 +571,11 @@ class GraphBuilder:
         work_node = self._ensure_work_node(work_name, work_meta, character_key)
         self._store_segments(segments, work_node.id)
 
-        extraction = self.extractor.extract(segments, character=character)
+        existing_context = None
+        if isinstance(self.extractor, LLMExtractor):
+            existing_context = self._build_existing_context(character_key, focus_name=character)
+
+        extraction = self.extractor.extract(segments, character=character, existing_context=existing_context)
         # stamp character_key on candidates if missing
         for n in extraction.nodes:
             if not n.character_key:
@@ -600,6 +689,37 @@ class GraphBuilder:
                 )
             )
         self.session.flush()
+
+    def _build_existing_context(self, character_key: str, focus_name: Optional[str]) -> Optional[str]:
+        """
+        Build a compact textual summary of existing graph facts to discourage duplicates.
+        """
+        if not hasattr(self, "session") or self.session is None:
+            return None
+        nodes_query = select(KGBasicNode).where(KGBasicNode.character_key == character_key)
+        if focus_name:
+            nodes_query = nodes_query.where(KGBasicNode.name.ilike(f"%{focus_name}%"))
+        nodes = self.session.scalars(nodes_query.limit(30)).all()
+        node_lines = [
+            f"[{n.type}] {n.name} aliases={n.alias_names or []} summary={n.summary or ''}"
+            for n in nodes
+        ]
+
+        edges_query = select(KGEdge).where(KGEdge.character_key == character_key)
+        if nodes:
+            node_ids = [n.id for n in nodes]
+            edges_query = edges_query.where(
+                or_(KGEdge.from_id.in_(node_ids), KGEdge.to_id.in_(node_ids))
+            )
+        edges = self.session.scalars(edges_query.limit(50)).all()
+        id_to_name = {str(n.id): n.name for n in nodes}
+        edge_lines = [
+            f"{id_to_name.get(str(e.from_id), str(e.from_id))} -[{e.relation}]-> {id_to_name.get(str(e.to_id), str(e.to_id))}"
+            for e in edges
+        ]
+        if not node_lines and not edge_lines:
+            return None
+        return "\n".join(node_lines + edge_lines)
 
     def _get_node_by_name_and_type(
         self, name: str, node_type: str, character_key: str

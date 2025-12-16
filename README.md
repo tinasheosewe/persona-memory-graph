@@ -6,6 +6,7 @@ Concrete, runnable pieces to build a character-focused knowledge graph in Postgr
 - `kg/schema.py` – SQLAlchemy models for `kg_nodes`, `kg_edges`, `source_segments` (Postgres-ready, UUID keys, JSONB/ARRAY columns).
 - `kg/pipeline.py` – segmentation helper, extractor protocol, LLM + mock extractors, and a `GraphBuilder` that persists nodes/edges/segments.
 - `kg/types.py` – Pydantic models for extraction payloads.
+- Episodic/principle support: `Episode` and `Principle` node types are allowed; meta can capture context/tension/response/rationale (episodes) and scope/support/exceptions (principles).
 - `requirements.txt` – core dependencies (SQLAlchemy, pydantic, psycopg2, openai).
 - Neo4j/Memgraph push helper: `kg/neo4j_memgraph.py` (`CypherGraphBuilder`).
 - Deep dive: `docs/PIPELINE.md` (full flow, LLM contract, and retrieval patterns).

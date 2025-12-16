@@ -12,6 +12,8 @@ NodeType = Literal[
     "Place",
     "Period",
     "SourceSegment",
+    "Episode",
+    "Principle",
 ]
 
 NODE_TYPE_VALUES: tuple[str, ...] = get_args(NodeType)

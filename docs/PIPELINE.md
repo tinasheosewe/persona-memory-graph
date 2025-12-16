@@ -14,9 +14,14 @@ This doc explains how the toolkit turns raw documents into a character-focused k
 - **Types**: `kg/types.py` defines `Segment`, `NodeCandidate`, `EdgeCandidate`.
 
 ## Data model (shared intent across stores)
-- Node types: `Character`, `Person`, `Event`, `Concept`, `Work`, `Place`, `Period`, `SourceSegment`.
+- Node types: `Character`, `Person`, `Event`, `Concept`, `Work`, `Place`, `Period`, `SourceSegment`, **`Episode`**, **`Principle`**.
 - Edge vocab (examples): `RELATES_TO`, `BELIEVES_IN`, `OPPOSES`, `INFLUENCED_BY`, `REFERENCES`, `SUPPORTS`, `CONTRADICTS`, `MENTORED_BY`, `PARTICIPATED_IN`, `OCCURRED_AT`, `OCCURRED_DURING`.
 - Source linkage: every node/edge can carry `source_ids` that point to the `SourceSegment` rows/nodes created from the text.
+
+### Episodic / principle modeling
+- **Episode** nodes: name is a short label; `meta` may include `context`, `tension`, `response`, `rationale`, `outcome`, `confidence`, `canon_status`. Attach a `source_id` for provenance.
+- **Principle** nodes: name/claim of the principle; `meta` may include `scope`, `support` (episode IDs/names or source IDs), `exceptions`, `confidence`. Use edges to link supporting or exception episodes.
+- Suggested edges: `EVIDENCED_BY` (Episode → SourceSegment), `DERIVED_FROM` or `SUPPORTS` (Principle → Episode), `EXCEPTION_OF` (Episode → Principle), `APPLIES_TO` (Principle → Episode).
 
 ## Pipeline: document → graph (Postgres)
 1. **Ingest text**: call `GraphBuilder.build_from_text(text, work_name, character=...)`.

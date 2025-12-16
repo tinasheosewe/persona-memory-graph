@@ -10,9 +10,10 @@ from typing import Dict, Iterable, List, Optional, Protocol, Sequence, Tuple
 
 from sqlalchemy import func, select, or_
 from sqlalchemy.orm import Session
+from pydantic import ValidationError
 
 from .schema import KGBasicNode, KGEdge, SourceSegment
-from .types import EdgeCandidate, NodeCandidate, Segment, NODE_TYPE_VALUES
+from .types import EdgeCandidate, NodeCandidate, Segment, NODE_TYPE_VALUES, RELATION_VALUES
 
 logger = logging.getLogger(__name__)
 
@@ -23,124 +24,7 @@ class GraphExtractionResult:
     edges: List[EdgeCandidate]
 
 
-DEFAULT_RELATIONS: tuple[str, ...] = (
-    # Existence, Identity, State
-    "RELATES_TO",
-    "IS",
-    "BECOMES",
-    "REMAINS",
-    "TRANSFORMS_INTO",
-    "EMBODIES",
-    "REPRESENTS",
-    "SYMBOLIZES",
-    "CONSTITUTES",
-    "CONTAINS",
-    "PART_OF",
-    # Temporal & Causal
-    "PRECEDES",
-    "FOLLOWS",
-    "COINCIDES_WITH",
-    "CAUSES",
-    "ENABLES",
-    "PREVENTS",
-    "TRIGGERS",
-    "RESULTS_IN",
-    "INTERRUPTS",
-    "ACCELERATES",
-    # Intention, Motivation, Cognition
-    "BELIEVES",
-    "KNOWS",
-    "ASSUMES",
-    "DOUBTS",
-    "QUESTIONS",
-    "INTENDS",
-    "DESIRES",
-    "FEARS",
-    "EXPECTS",
-    "REGRETS",
-    # Decision & Action
-    "CHOOSES",
-    "DECIDES_AGAINST",
-    "ACTS_ON",
-    "REACTS_TO",
-    "INITIATES",
-    "ABANDONS",
-    "PURSUES",
-    "AVOIDS",
-    "COMMITS_TO",
-    "WITHDRAWS_FROM",
-    # Influence & Power
-    "INFLUENCES",
-    "SHAPES",
-    "CONTROLS",
-    "CONSTRAINS",
-    "EMPOWERS",
-    "UNDERMINES",
-    "MANIPULATES",
-    "RESISTS",
-    "DOMINATES",
-    "DEPENDS_ON",
-    # Social & Relational Dynamics
-    "SUPPORTS",
-    "OPPOSES",
-    "ALLIES_WITH",
-    "BETRAYS",
-    "TRUSTS",
-    "DISTRUSTS",
-    "OBEYS",
-    "DEFIES",
-    "LEADS",
-    "FOLLOWS",
-    # Communication & Expression
-    "STATES",
-    "CLAIMS",
-    "ARGUES",
-    "DENIES",
-    "ADMITS",
-    "PROMISES",
-    "WARNS",
-    "CONFESSES",
-    "IMPLIES",
-    "CONCEALS",
-    # Evaluation, Judgment, Value
-    "VALUES",
-    "DEVALUES",
-    "PRAISES",
-    "CRITICIZES",
-    "APPROVES",
-    "REJECTS",
-    "JUSTIFIES",
-    "CONDEMNS",
-    "RATIONALIZES",
-    "PRIORITIZES",
-    # Knowledge, Reference, Evidence
-    "REFERENCES",
-    "CITES",
-    "DERIVES_FROM",
-    "CONTRADICTS",
-    "CONFIRMS",
-    "MISINTERPRETS",
-    "CLARIFIES",
-    "SUMMARIZES",
-    "EXPLAINS",
-    "QUESTIONS_VALIDITY_OF",
-    "EVIDENCED_BY",
-    # Creation, Ownership, Responsibility
-    "CREATES",
-    "DESTROYS",
-    "OWNS",
-    "USES",
-    "ABUSES",
-    "PROTECTS",
-    "SACRIFICES",
-    "INHERITS",
-    "TRANSMITS",
-    "ATTRIBUTED_TO",
-    # Episode/principle scaffolding
-    "APPLIES_TO",
-    "EXCEPTION_OF",
-    "INSPIRED_BY",
-)
+DEFAULT_RELATIONS: tuple[str, ...] = RELATION_VALUES
 
 
 class BaseExtractor(Protocol):
@@ -240,7 +124,7 @@ class LLMExtractor(BaseExtractor):
         batch_size: int = 10,
         batch_overlap: int = 1,
         max_workers: int = 4,
-        allow_open_relations: bool = False,
+        allow_open_relations: bool = True,
     ):
         self.client = client
         self.model = model
@@ -310,8 +194,19 @@ class LLMExtractor(BaseExtractor):
         return json.loads(content)
 
     def _result_from_payload(self, data: dict) -> GraphExtractionResult:
-        nodes = [NodeCandidate(**node) for node in self._normalize_nodes(data.get("nodes", []))]
-        edges = [EdgeCandidate(**edge) for edge in self._normalize_edges(data.get("edges", []))]
+        raw_nodes = data.get("nodes", []) or []
+        raw_edges = data.get("edges", []) or []
+
+        nodes: List[NodeCandidate] = [NodeCandidate(**node) for node in self._normalize_nodes(raw_nodes)]
+        edges: List[EdgeCandidate] = [EdgeCandidate(**edge) for edge in self._normalize_edges(raw_edges)]
+
+        logger.debug(
+            "LLMExtractor normalization: raw nodes=%s -> kept=%s, raw edges=%s -> kept=%s",
+            len(raw_nodes),
+            len(nodes),
+            len(raw_edges),
+            len(edges),
+        )
         return GraphExtractionResult(nodes=nodes, edges=edges)
 
     def _build_prompt(
@@ -342,9 +237,8 @@ class LLMExtractor(BaseExtractor):
             "  - Principle nodes: set name/claim to the principle; include meta.scope, meta.support (episode ids/names or source ids), meta.confidence?, meta.exceptions?\n"
             "  - Factual nodes (Character/Person/Organization/Event/etc.): capture summaries and aliases as usual.\n"
             "edges: array of {from_name: string, to_name: string, relation: one of [" + relation_vocab + "], description?: string, meta?: {nature?: string}, source_id?: string, confidence?: number}\n"
-            "  - Link episodes to evidence with EVIDENCED_BY; link principles to supporting episodes with DERIVED_FROM or SUPPORTS; link exception episodes with EXCEPTION_OF; link principles to episodes they govern with APPLIES_TO.\n"
             "  - Use only the provided relation vocabulary; if nothing fits, use RELATES_TO and set meta.original_relation to the raw phrase.\n"
-            "Do not invent types outside the allowed list. Always include from_name and to_name for edges. Prefer to include source_id on nodes/edges for provenance.\n"
+            "Do not invent types outside the allowed list. Do not invent relations outside the allowed list. Always include from_name and to_name for edges. Prefer to include source_id on nodes/edges for provenance.\n"
             "Text segments:\n" + "\n".join(text_blocks)
         )
 
@@ -507,7 +401,7 @@ class LLMExtractor(BaseExtractor):
                         ecopy["meta"].setdefault("original_relation", sanitized)
                         sanitized = "RELATES_TO"
                     else:
-                        logger.warning("Skipping edge with unsupported relation: %s", sanitized)
+                        logger.warning("Skipping edge with unsupported relation: %s (from=%s to=%s raw=%s)", sanitized, ecopy.get("from_name"), ecopy.get("to_name"), edge)
                         continue
                 ecopy["relation"] = sanitized
             if "confidence" not in ecopy and "weight" in ecopy:

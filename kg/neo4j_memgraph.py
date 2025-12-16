@@ -5,6 +5,7 @@ from neo4j import Driver
 
 from .pipeline import BaseExtractor, GraphExtractionResult, segment_text
 from .types import EdgeCandidate, NodeCandidate, Segment
+from .pipeline import LLMExtractor  # for type checking existing_context
 
 
 def _normalize_label(label: str) -> str:
@@ -70,7 +71,10 @@ class CypherGraphBuilder:
             location_prefix=location_prefix,
         )
         self._store_segments(work_name, work_meta, segments, character_key)
-        extraction = self.extractor.extract(segments, character=character)
+        existing_context = None
+        if isinstance(self.extractor, LLMExtractor):
+            existing_context = self._build_existing_context(character_key, focus_name=character)
+        extraction = self.extractor.extract(segments, character=character, existing_context=existing_context)
         for n in extraction.nodes:
             if not getattr(n, "meta", None):
                 n.meta = {}
@@ -177,6 +181,41 @@ class CypherGraphBuilder:
                     edge,
                     character_key,
                 )
+
+    def _build_existing_context(self, character_key: str, focus_name: Optional[str]) -> Optional[str]:
+        """
+        Build a compact textual summary of existing graph facts to discourage duplicates.
+        """
+        try:
+            with self.driver.session() as session:
+                node_query = """
+                MATCH (n {character_key: $ck})
+                WHERE $name IS NULL OR n.name CONTAINS $name
+                RETURN n.name AS name, n.type AS type, n.alias_names AS aliases, n.summary AS summary
+                LIMIT 30
+                """
+                edge_query = """
+                MATCH (a {character_key: $ck})-[r]->(b {character_key: $ck})
+                WHERE ($name IS NULL OR a.name CONTAINS $name OR b.name CONTAINS $name)
+                RETURN a.name AS from_name, b.name AS to_name, type(r) AS relation
+                LIMIT 50
+                """
+                nodes = session.run(node_query, ck=character_key, name=focus_name).data()
+                edges = session.run(edge_query, ck=character_key, name=focus_name).data()
+        except Exception:
+            return None
+
+        node_lines = [
+            f"[{n.get('type')}] {n.get('name')} aliases={n.get('aliases') or []} summary={n.get('summary') or ''}"
+            for n in nodes
+        ]
+        edge_lines = [
+            f"{e.get('from_name')} -[{e.get('relation')}]-> {e.get('to_name')}"
+            for e in edges
+        ]
+        if not node_lines and not edge_lines:
+            return None
+        return "\n".join(node_lines + edge_lines)
 
     @staticmethod
     def _merge_edge_tx(tx, rel_type: str, edge: EdgeCandidate, character_key: str):

@@ -13,9 +13,10 @@ Environment:
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Set
 
 from fastapi import Depends, FastAPI, File, HTTPException, UploadFile
 from fastapi.responses import JSONResponse
@@ -75,6 +76,28 @@ class QueryResponse(BaseModel):
     nodes: List[dict]
     edges: List[dict]
     prompt_used: str
+
+
+class LLMWalkRequest(BaseModel):
+    prompt: str
+    character: Optional[str] = None
+    character_key: str = "default"
+    max_steps: int = 2
+    max_expansions: int = 3
+
+
+class LLMWalkStep(BaseModel):
+    expand_nodes: List[str]
+    added_nodes: int
+    added_edges: int
+
+
+class LLMWalkResponse(BaseModel):
+    prompt_used: str
+    steps: List[LLMWalkStep]
+    nodes: List[dict]
+    edges: List[dict]
+    answer: Optional[str]
 
 
 # --- Helpers ------------------------------------------------------------------
@@ -243,6 +266,50 @@ def build_llm_answer_from_dicts(prompt: str, nodes: List[dict], edges: List[dict
     return response.choices[0].message.content
 
 
+def choose_walk_targets(prompt: str, nodes: List[dict], edges: List[dict], max_expansions: int) -> List[str]:
+    """
+    Ask the LLM which nodes to expand next based on current context.
+    Falls back to an empty list if no API key is present.
+    """
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        return []
+    from openai import OpenAI
+
+    client = OpenAI(api_key=api_key)
+    model = os.getenv("LLM_MODEL", "gpt-4o-mini")
+
+    node_lines = [
+        f"[{n.get('type')}] {n.get('name')}: {n.get('summary') or ''}"
+        for n in nodes
+    ]
+    edge_lines = [
+        f"{e.get('from')} -[{e.get('relation')}]-> {e.get('to')}"
+        for e in edges
+    ]
+    content = (
+        "You are deciding which nodes to expand next in a knowledge graph to answer a query.\n"
+        f"Query: {prompt}\n"
+        "Current nodes:\n" + "\n".join(node_lines) + "\n"
+        "Current edges:\n" + "\n".join(edge_lines) + "\n"
+        f"Return a JSON object with key 'expand' listing up to {max_expansions} node names to explore for more neighbors.\n"
+        "If no expansion is needed, return an empty list."
+    )
+    res = client.chat.completions.create(
+        model=model,
+        messages=[{"role": "user", "content": content}],
+        response_format={"type": "json_object"},
+    )
+    try:
+        data = json.loads(res.choices[0].message.content)
+        expand = data.get("expand") or []
+        if isinstance(expand, list):
+            return [str(x) for x in expand][:max_expansions]
+    except Exception:
+        return []
+    return []
+
+
 # --- Routes -------------------------------------------------------------------
 @app.post("/ingest-book", response_model=IngestResponse)
 def ingest_book(
@@ -341,6 +408,124 @@ def query_graph(body: QueryRequest, session: Session = Depends(get_session)):
         nodes_out, edges_out = [], []
     answer = build_llm_answer_from_dicts(body.prompt, nodes_out, edges_out)
     return QueryResponse(answer=answer, nodes=nodes_out, edges=edges_out, prompt_used=body.prompt)
+
+
+def fetch_neighbors(session: Session, node_ids: Set[str], character_key: str):
+    if not node_ids:
+        return [], []
+    nodes = session.scalars(
+        select(KGBasicNode).where(
+            KGBasicNode.character_key == character_key,
+            KGBasicNode.id.in_(list(node_ids)),
+        )
+    ).all()
+    edges = session.scalars(
+        select(KGEdge).where(
+            KGEdge.character_key == character_key,
+            or_(KGEdge.from_id.in_(list(node_ids)), KGEdge.to_id.in_(list(node_ids))),
+        )
+    ).all()
+    return nodes, edges
+
+
+@app.post("/llm-walk", response_model=LLMWalkResponse)
+def llm_walk(body: LLMWalkRequest, session: Session = Depends(get_session)):
+    if session is None:
+        raise HTTPException(status_code=400, detail="Database session required for graph walk")
+
+    focus_character = resolve_character(body.prompt, body.character)
+    nodes, edges = fetch_context(session, focus_character, body.prompt, character_key=body.character_key)
+    steps: List[LLMWalkStep] = []
+
+    # Serialize initial context
+    nodes_out = [
+        {
+            "id": str(n.id),
+            "type": n.type,
+            "name": n.name,
+            "summary": n.summary,
+            "aliases": n.alias_names,
+            "character_key": n.character_key,
+        }
+        for n in nodes
+    ]
+    id_to_name = {n["id"]: n["name"] for n in nodes_out}
+    edges_out = [
+        {
+            "id": e.id,
+            "from": id_to_name.get(str(e.from_id), str(e.from_id)),
+            "to": id_to_name.get(str(e.to_id), str(e.to_id)),
+            "relation": e.relation,
+            "description": e.description,
+            "meta": e.meta,
+        }
+        for e in edges
+    ]
+
+    seen_node_ids: Set[str] = set(id_to_name.keys())
+    seen_edge_keys: Set[tuple] = set((edge["from"], edge["to"], edge["relation"]) for edge in edges_out)
+
+    for _ in range(max(0, body.max_steps)):
+        expand_names = choose_walk_targets(body.prompt, nodes_out, edges_out, body.max_expansions)
+        if not expand_names:
+            break
+        # Map requested names to known node ids; if not found, skip
+        target_ids = {nid for nid, name in id_to_name.items() if name in expand_names}
+        if not target_ids:
+            break
+        new_nodes, new_edges = fetch_neighbors(session, target_ids, character_key=body.character_key)
+
+        added_nodes = 0
+        for n in new_nodes:
+            nid = str(n.id)
+            if nid in seen_node_ids:
+                continue
+            nodes_out.append(
+                {
+                    "id": nid,
+                    "type": n.type,
+                    "name": n.name,
+                    "summary": n.summary,
+                    "aliases": n.alias_names,
+                    "character_key": n.character_key,
+                }
+            )
+            id_to_name[nid] = n.name
+            seen_node_ids.add(nid)
+            added_nodes += 1
+
+        added_edges = 0
+        for e in new_edges:
+            from_name = id_to_name.get(str(e.from_id), str(e.from_id))
+            to_name = id_to_name.get(str(e.to_id), str(e.to_id))
+            key = (from_name, to_name, e.relation)
+            if key in seen_edge_keys:
+                continue
+            edges_out.append(
+                {
+                    "id": e.id,
+                    "from": from_name,
+                    "to": to_name,
+                    "relation": e.relation,
+                    "description": e.description,
+                    "meta": e.meta,
+                }
+            )
+            seen_edge_keys.add(key)
+            added_edges += 1
+
+        steps.append(LLMWalkStep(expand_nodes=list(expand_names), added_nodes=added_nodes, added_edges=added_edges))
+        if added_nodes == 0 and added_edges == 0:
+            break
+
+    answer = build_llm_answer_from_dicts(body.prompt, nodes_out, edges_out)
+    return LLMWalkResponse(
+        prompt_used=body.prompt,
+        steps=steps,
+        nodes=nodes_out,
+        edges=edges_out,
+        answer=answer,
+    )
 
 
 @app.get("/health")

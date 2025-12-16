@@ -11,6 +11,7 @@ Usage:
 """
 
 import argparse
+import logging
 import os
 from pathlib import Path
 
@@ -49,6 +50,9 @@ def choose_extractor():
 
 
 def main():
+    logging.basicConfig(
+        level=getattr(logging, os.getenv("LOGLEVEL", "INFO").upper(), logging.INFO)
+    )
     parser = argparse.ArgumentParser(description="Ingest into Neo4j and print nodes/edges.")
     parser.add_argument("--text", help="Path to text file")
     parser.add_argument("--pdf", help="Path to PDF file")

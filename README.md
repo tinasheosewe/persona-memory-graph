@@ -102,6 +102,13 @@ builder.build_from_text(text, work_name="Collected Letters", character="Marcus")
 ## Need more detail?
 See `docs/PIPELINE.md` for step-by-step architecture, the LLM JSON contract, and example SQL/Cypher queries.
 
+## Docker
+- From `CHATBOT-KG/`, build the image: `docker build -t character-kg .`.
+- Run against an existing Postgres: `docker run --env-file .env -e DATABASE_URL=postgresql+psycopg2://user:pass@host:5432/db -p 8000:8000 character-kg`.
+- Bundle Postgres locally: `cp .env.example .env && docker compose up --build` (exposes API on `8000` and Postgres on `5432`).
+- Optional Neo4j profile: `docker compose --profile neo4j up --build` then set `NEO4J_URI=neo4j://neo4j:7687`, `NEO4J_USER=neo4j`, `NEO4J_PASSWORD=kgneo4jpass` (credentials match the compose profile).
+- Healthcheck once running: `GET http://localhost:8000/health`.
+
 ## Deploying to Render
 - A `render.yaml` is included. It provisions:
   - A Postgres instance (`character-kg-db`) and a web service running FastAPI (`uvicorn app.main:app`).

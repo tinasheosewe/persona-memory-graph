@@ -1,0 +1,21 @@
+# Exclude files not needed in the build context
+.git
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.log
+*.DS_Store
+.env
+.venv
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+
+# Tests and docs stay out of the image
+/tests/
+/test_files/
+/docs/
+
+# Local tooling and scripts
+/scripts/

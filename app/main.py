@@ -84,6 +84,8 @@ class LLMWalkRequest(BaseModel):
     character_key: str = "default"
     max_steps: int = 2
     max_expansions: int = 3
+    expansion_model: Optional[str] = None
+    answer_model: Optional[str] = None
 
 
 class LLMWalkStep(BaseModel):
@@ -237,14 +239,14 @@ def fetch_context_neo4j(character: Optional[str], prompt: str, character_key: st
     return nodes, edges
 
 
-def build_llm_answer_from_dicts(prompt: str, nodes: List[dict], edges: List[dict]) -> Optional[str]:
+def build_llm_answer_from_dicts(prompt: str, nodes: List[dict], edges: List[dict], model_override: Optional[str] = None) -> Optional[str]:
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
         return None
     from openai import OpenAI
 
     client = OpenAI(api_key=api_key)
-    model = os.getenv("LLM_MODEL", "gpt-4o-mini")
+    model = model_override or os.getenv("LLM_MODEL", "gpt-4o-mini")
 
     node_lines = [
         f"[{n.get('type')}] {n.get('name')}: {n.get('summary') or ''} (aliases={n.get('aliases') or []})"
@@ -277,7 +279,7 @@ def choose_walk_targets(prompt: str, nodes: List[dict], edges: List[dict], max_e
     from openai import OpenAI
 
     client = OpenAI(api_key=api_key)
-    model = os.getenv("LLM_MODEL", "gpt-4o-mini")
+    model = os.getenv("LLM_WALK_MODEL", os.getenv("LLM_MODEL", "gpt-4o-mini"))
 
     node_lines = [
         f"[{n.get('type')}] {n.get('name')}: {n.get('summary') or ''}"
@@ -466,7 +468,12 @@ def llm_walk(body: LLMWalkRequest, session: Session = Depends(get_session)):
     seen_edge_keys: Set[tuple] = set((edge["from"], edge["to"], edge["relation"]) for edge in edges_out)
 
     for _ in range(max(0, body.max_steps)):
-        expand_names = choose_walk_targets(body.prompt, nodes_out, edges_out, body.max_expansions)
+        expand_names = choose_walk_targets(
+            body.prompt,
+            nodes_out,
+            edges_out,
+            body.max_expansions,
+        )
         if not expand_names:
             break
         # Map requested names to known node ids; if not found, skip
@@ -518,7 +525,7 @@ def llm_walk(body: LLMWalkRequest, session: Session = Depends(get_session)):
         if added_nodes == 0 and added_edges == 0:
             break
 
-    answer = build_llm_answer_from_dicts(body.prompt, nodes_out, edges_out)
+    answer = build_llm_answer_from_dicts(body.prompt, nodes_out, edges_out, model_override=body.answer_model or os.getenv("LLM_MODEL"))
     return LLMWalkResponse(
         prompt_used=body.prompt,
         steps=steps,

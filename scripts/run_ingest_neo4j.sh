@@ -19,8 +19,8 @@ fi
 
 export PYTHONPATH="$ROOT:${PYTHONPATH:-}"
 
-TEXT_PATH="${1:-$ROOT/test_files/demo_story.txt}"
-CHARACTER="${CHARACTER:-Aurelia}"
+TEXT_PATH="${1:-$ROOT/test_files/demo_story_2.txt}"
+CHARACTER="${CHARACTER:-Warren Buffett}"
 CHARACTER_KEY="${CHARACTER_KEY:-default}"
 
 python "$ROOT/scripts/ingest_to_neo4j.py" --text "$TEXT_PATH" --character "$CHARACTER" --character-key "$CHARACTER_KEY"

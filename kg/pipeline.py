@@ -24,28 +24,122 @@ class GraphExtractionResult:
 
 
 DEFAULT_RELATIONS: tuple[str, ...] = (
+    # Existence, Identity, State
     "RELATES_TO",
-    "BELIEVES_IN",
-    "OPPOSES",
-    "INFLUENCED_BY",
-    "FRIEND_OF",
-    "ENEMY_OF",
-    "MENTORED_BY",
-    "MEMBER_OF",
-    "PARTICIPATED_IN",
-    "OCCURRED_AT",
-    "OCCURRED_DURING",
-    "WROTE",
-    "DISCUSSES",
-    "REFERENCES",
-    "CONTRADICTS",
+    "IS",
+    "BECOMES",
+    "REMAINS",
+    "TRANSFORMS_INTO",
+    "EMBODIES",
+    "REPRESENTS",
+    "SYMBOLIZES",
+    "CONSTITUTES",
+    "CONTAINS",
+    "PART_OF",
+    # Temporal & Causal
+    "PRECEDES",
+    "FOLLOWS",
+    "COINCIDES_WITH",
+    "CAUSES",
+    "ENABLES",
+    "PREVENTS",
+    "TRIGGERS",
+    "RESULTS_IN",
+    "INTERRUPTS",
+    "ACCELERATES",
+    # Intention, Motivation, Cognition
+    "BELIEVES",
+    "KNOWS",
+    "ASSUMES",
+    "DOUBTS",
+    "QUESTIONS",
+    "INTENDS",
+    "DESIRES",
+    "FEARS",
+    "EXPECTS",
+    "REGRETS",
+    # Decision & Action
+    "CHOOSES",
+    "DECIDES_AGAINST",
+    "ACTS_ON",
+    "REACTS_TO",
+    "INITIATES",
+    "ABANDONS",
+    "PURSUES",
+    "AVOIDS",
+    "COMMITS_TO",
+    "WITHDRAWS_FROM",
+    # Influence & Power
+    "INFLUENCES",
+    "SHAPES",
+    "CONTROLS",
+    "CONSTRAINS",
+    "EMPOWERS",
+    "UNDERMINES",
+    "MANIPULATES",
+    "RESISTS",
+    "DOMINATES",
+    "DEPENDS_ON",
+    # Social & Relational Dynamics
     "SUPPORTS",
-    "INSPIRED_BY",
-    "FOUNDED",
+    "OPPOSES",
+    "ALLIES_WITH",
+    "BETRAYS",
+    "TRUSTS",
+    "DISTRUSTS",
+    "OBEYS",
+    "DEFIES",
+    "LEADS",
+    "FOLLOWS",
+    # Communication & Expression
+    "STATES",
+    "CLAIMS",
+    "ARGUES",
+    "DENIES",
+    "ADMITS",
+    "PROMISES",
+    "WARNS",
+    "CONFESSES",
+    "IMPLIES",
+    "CONCEALS",
+    # Evaluation, Judgment, Value
+    "VALUES",
+    "DEVALUES",
+    "PRAISES",
+    "CRITICIZES",
+    "APPROVES",
+    "REJECTS",
+    "JUSTIFIES",
+    "CONDEMNS",
+    "RATIONALIZES",
+    "PRIORITIZES",
+    # Knowledge, Reference, Evidence
+    "REFERENCES",
+    "CITES",
+    "DERIVES_FROM",
+    "CONTRADICTS",
+    "CONFIRMS",
+    "MISINTERPRETS",
+    "CLARIFIES",
+    "SUMMARIZES",
+    "EXPLAINS",
+    "QUESTIONS_VALIDITY_OF",
     "EVIDENCED_BY",
-    "DERIVED_FROM",
+    # Creation, Ownership, Responsibility
+    "CREATES",
+    "DESTROYS",
+    "OWNS",
+    "USES",
+    "ABUSES",
+    "PROTECTS",
+    "SACRIFICES",
+    "INHERITS",
+    "TRANSMITS",
+    "ATTRIBUTED_TO",
+    # Episode/principle scaffolding
     "APPLIES_TO",
     "EXCEPTION_OF",
+    "INSPIRED_BY",
 )
 
 
@@ -146,6 +240,7 @@ class LLMExtractor(BaseExtractor):
         batch_size: int = 10,
         batch_overlap: int = 1,
         max_workers: int = 4,
+        allow_open_relations: bool = False,
     ):
         self.client = client
         self.model = model
@@ -161,6 +256,7 @@ class LLMExtractor(BaseExtractor):
             )
         self.batch_overlap = max(0, min(batch_overlap, self.batch_size - 1))
         self.max_workers = max(1, max_workers)
+        self.allow_open_relations = allow_open_relations
 
     def extract(
         self, segments: List[Segment], character: Optional[str] = None, existing_context: Optional[str] = None
@@ -247,8 +343,8 @@ class LLMExtractor(BaseExtractor):
             "  - Factual nodes (Character/Person/Organization/Event/etc.): capture summaries and aliases as usual.\n"
             "edges: array of {from_name: string, to_name: string, relation: one of [" + relation_vocab + "], description?: string, meta?: {nature?: string}, source_id?: string, confidence?: number}\n"
             "  - Link episodes to evidence with EVIDENCED_BY; link principles to supporting episodes with DERIVED_FROM or SUPPORTS; link exception episodes with EXCEPTION_OF; link principles to episodes they govern with APPLIES_TO.\n"
-            "  - Include factual relations between entities as needed (e.g., RELATES_TO, BELIEVES_IN, OPPOSES, REFERENCES).\n"
-            "Do not invent types outside the allowed list. Always include from_name and to_name for edges. Use the provided relation vocabulary only. Prefer to include source_id on nodes/edges for provenance.\n"
+            "  - Use only the provided relation vocabulary; if nothing fits, use RELATES_TO and set meta.original_relation to the raw phrase.\n"
+            "Do not invent types outside the allowed list. Always include from_name and to_name for edges. Prefer to include source_id on nodes/edges for provenance.\n"
             "Text segments:\n" + "\n".join(text_blocks)
         )
 
@@ -402,18 +498,18 @@ class LLMExtractor(BaseExtractor):
                     if key in ecopy:
                         ecopy["to_name"] = ecopy[key]
                         break
+            if "meta" not in ecopy:
+                ecopy["meta"] = {}
             if "relation" in ecopy and isinstance(ecopy["relation"], str):
                 sanitized = re.sub(r"[^A-Za-z0-9]+", "_", ecopy["relation"]).strip("_").upper()
-                synonym_map = {
-                    "ENEMY_OF": "OPPOSES",
-                    "RIVAL_OF": "OPPOSES",
-                    "ALLY_OF": "SUPPORTS",
-                }
-                sanitized = synonym_map.get(sanitized, sanitized)
+                if self.relations and sanitized not in allowed_relations:
+                    if self.allow_open_relations:
+                        ecopy["meta"].setdefault("original_relation", sanitized)
+                        sanitized = "RELATES_TO"
+                    else:
+                        logger.warning("Skipping edge with unsupported relation: %s", sanitized)
+                        continue
                 ecopy["relation"] = sanitized
-            if self.relations and ecopy.get("relation") not in allowed_relations:
-                logger.warning("Skipping edge with unsupported relation: %s", ecopy.get("relation"))
-                continue
             if "confidence" not in ecopy and "weight" in ecopy:
                 ecopy["confidence"] = ecopy["weight"]
             if "meta" not in ecopy:

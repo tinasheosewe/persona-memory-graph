@@ -4,11 +4,14 @@ FastAPI service for ingesting books into the graph and querying with LLM-backed 
 Endpoints:
 - POST /ingest-book: upload a text/PDF file, extract nodes/edges, persist to DB.
 - POST /query: provide a prompt (+ optional character); fetch related nodes/edges and ask the LLM to answer.
+- POST /llm-walk: start from the same context and let the LLM pick nodes to expand, hop by hop.
+- GET /health: liveness check.
 
 Environment:
 - DATABASE_URL (required)
 - OPENAI_API_KEY (optional; when absent, ingestion/query falls back to mock extraction or returns context only)
-- LLM_MODEL (optional; default gpt-4o-mini)
+- LLM_MODEL (optional; default gpt-4o-mini), LLM_WALK_MODEL (optional; model for the walk's expansion step)
+- NEO4J_URI, NEO4J_USER, NEO4J_PASSWORD (optional; when set, ingestion also writes to Neo4j and /query and /llm-walk read from it)
 """
 
 from __future__ import annotations
@@ -198,31 +201,38 @@ def fetch_context(session: Session, character: Optional[str], prompt: str, chara
     return nodes, edges
 
 
+def neo4j_node_to_dict(node) -> dict:
+    return {
+        "id": str(node.element_id),
+        "type": node.get("type"),
+        "name": node.get("name"),
+        "summary": node.get("summary"),
+        "aliases": node.get("alias_names", []),
+        "character_key": node.get("character_key"),
+        "source_ids": node.get("source_ids", []),
+    }
+
+
+# The Neo4j projection also holds SourceSegment nodes and Work-[:HAS_SEGMENT]->SourceSegment
+# relationships. They carry the source text, not graph facts (Postgres keeps them in
+# source_segments), so the read queries below leave them out.
 def fetch_context_neo4j(character: Optional[str], prompt: str, character_key: str):
     if not neo4j_driver:
         return [], []
     name_filter = character or resolve_character(prompt, None)
     node_query = """
     MATCH (n {character_key: $ck})
-    WHERE $name IS NULL OR n.name CONTAINS $name
+    WHERE NOT n:SourceSegment AND ($name IS NULL OR n.name CONTAINS $name)
     RETURN n LIMIT 200
     """
     edge_query = """
     MATCH (a {character_key: $ck})-[r]->(b {character_key: $ck})
-    WHERE ($name IS NULL OR a.name CONTAINS $name OR b.name CONTAINS $name)
+    WHERE type(r) <> 'HAS_SEGMENT' AND ($name IS NULL OR a.name CONTAINS $name OR b.name CONTAINS $name)
     RETURN a.name AS from_name, b.name AS to_name, type(r) AS relation, r.description AS description, r.meta AS meta, r.source_ids AS source_ids LIMIT 300
     """
     with neo4j_driver.session() as session:
         nodes = [
-            {
-                "id": str(record["n"].id),
-                "type": record["n"].get("type"),
-                "name": record["n"].get("name"),
-                "summary": record["n"].get("summary"),
-                "aliases": record["n"].get("alias_names", []),
-                "character_key": record["n"].get("character_key"),
-                "source_ids": record["n"].get("source_ids", []),
-            }
+            neo4j_node_to_dict(record["n"])
             for record in session.run(node_query, ck=character_key, name=name_filter)
         ]
         edges = [
@@ -396,6 +406,8 @@ def ingest_book(
 def query_graph(body: QueryRequest, session: Session = Depends(get_session)):
     if session is None:
         raise HTTPException(status_code=400, detail="Database session required to fetch source evidence")
+    # Ensure Neo4j driver is initialized if creds are present
+    get_cypher_builder()
     focus_character = resolve_character(body.prompt, body.character)
     nodes_out: List[dict] = []
     edges_out: List[dict] = []
@@ -416,6 +428,9 @@ def query_graph(body: QueryRequest, session: Session = Depends(get_session)):
             for n in nodes
         ]
         id_to_name = {n["id"]: n["name"] for n in nodes_out}
+        # Edges also point at nodes that are not returned; look those up so both ends are names.
+        for endpoint in fetch_edge_endpoints(session, edges, {n.id for n in nodes}):
+            id_to_name[str(endpoint.id)] = endpoint.name
         edges_out = [
             {
                 "id": e.id,
@@ -439,7 +454,22 @@ def query_graph(body: QueryRequest, session: Session = Depends(get_session)):
     return QueryResponse(answer=answer, nodes=nodes_out, edges=edges_out, prompt_used=body.prompt)
 
 
+def fetch_edge_endpoints(session: Session, edges, known_ids: Set) -> list:
+    """Return the nodes at either end of `edges` whose ids are not in `known_ids`."""
+    missing = set()
+    for e in edges:
+        for node_id in (e.from_id, e.to_id):
+            if node_id is not None and node_id not in known_ids:
+                missing.add(node_id)
+    if not missing:
+        return []
+    return session.scalars(
+        select(KGBasicNode).where(KGBasicNode.id.in_(list(missing)))
+    ).all()
+
+
 def fetch_neighbors(session: Session, node_ids: Set[str], character_key: str):
+    """Return the given nodes, every edge that touches them, and the nodes at the far end of those edges."""
     if not node_ids:
         return [], []
     nodes = session.scalars(
@@ -454,6 +484,7 @@ def fetch_neighbors(session: Session, node_ids: Set[str], character_key: str):
             or_(KGEdge.from_id.in_(list(node_ids)), KGEdge.to_id.in_(list(node_ids))),
         )
     ).all()
+    nodes = list(nodes) + list(fetch_edge_endpoints(session, edges, {n.id for n in nodes}))
     return nodes, edges
 
 
@@ -474,32 +505,34 @@ def fetch_segments(session: Session, source_ids: Set[str]) -> List[dict]:
     ]
 
 
-def fetch_neighbors_neo4j(node_names: Set[str], character_key: str):
-    if not node_names or not neo4j_driver:
-        return [], []
-    name_list = list(node_names)
+def fetch_nodes_neo4j(node_names: Set[str], character_key: str) -> List[dict]:
+    """Return the nodes with the given names."""
+    names = [name for name in node_names if name]
+    if not names or not neo4j_driver:
+        return []
     node_query = """
     MATCH (n {character_key: $ck})
     WHERE n.name IN $names
     RETURN n
     """
+    with neo4j_driver.session() as session:
+        return [
+            neo4j_node_to_dict(record["n"])
+            for record in session.run(node_query, ck=character_key, names=names)
+        ]
+
+
+def fetch_neighbors_neo4j(node_names: Set[str], character_key: str):
+    """Return the named nodes, every edge that touches them, and the nodes at the far end of those edges."""
+    if not node_names or not neo4j_driver:
+        return [], []
+    name_list = list(node_names)
     edge_query = """
     MATCH (a {character_key: $ck})-[r]->(b {character_key: $ck})
-    WHERE a.name IN $names OR b.name IN $names
+    WHERE type(r) <> 'HAS_SEGMENT' AND (a.name IN $names OR b.name IN $names)
     RETURN a.name AS from_name, b.name AS to_name, type(r) AS relation, r.description AS description, r.meta AS meta, r.source_ids AS source_ids
     """
     with neo4j_driver.session() as session:
-        nodes = [
-            {
-                "id": record["n"].id if hasattr(record["n"], "id") else record["n"].get("name"),
-                "type": record["n"].get("type"),
-                "name": record["n"].get("name"),
-                "summary": record["n"].get("summary"),
-                "aliases": record["n"].get("alias_names", []),
-                "character_key": record["n"].get("character_key"),
-            }
-            for record in session.run(node_query, ck=character_key, names=name_list)
-        ]
         edges = [
             {
                 "from": record["from_name"],
@@ -512,6 +545,10 @@ def fetch_neighbors_neo4j(node_names: Set[str], character_key: str):
             }
             for record in session.run(edge_query, ck=character_key, names=name_list)
         ]
+    names = set(name_list)
+    for edge in edges:
+        names.update((edge["from"], edge["to"]))
+    nodes = fetch_nodes_neo4j(names, character_key=character_key)
     return nodes, edges
 
 
@@ -526,11 +563,17 @@ def llm_walk(body: LLMWalkRequest, session: Session = Depends(get_session)):
     focus_character = resolve_character(body.prompt, body.character)
     steps: List[LLMWalkStep] = []
 
+    # Starting context: the focus node(s), their edges, and the nodes at the far end of those
+    # edges. Every edge endpoint is then a loaded node, so it has a name and can be expanded.
     if use_neo:
         nodes_out, edges_out = fetch_context_neo4j(focus_character, body.prompt, character_key=body.character_key)
-        id_to_name = {n["name"]: n["name"] for n in nodes_out}
+        loaded_names = {n["name"] for n in nodes_out}
+        endpoint_names = {name for e in edges_out for name in (e["from"], e["to"])}
+        nodes_out.extend(fetch_nodes_neo4j(endpoint_names - loaded_names, character_key=body.character_key))
+        id_to_name = {n["id"]: n["name"] for n in nodes_out}
     else:
         nodes, edges = fetch_context(session, focus_character, body.prompt, character_key=body.character_key)
+        nodes = list(nodes) + list(fetch_edge_endpoints(session, edges, {n.id for n in nodes}))
         nodes_out = [
             {
                 "id": str(n.id),
@@ -539,6 +582,7 @@ def llm_walk(body: LLMWalkRequest, session: Session = Depends(get_session)):
                 "summary": n.summary,
                 "aliases": n.alias_names,
                 "character_key": n.character_key,
+                "source_ids": n.source_ids,
             }
             for n in nodes
         ]

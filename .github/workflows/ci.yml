@@ -1,0 +1,136 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    name: Unit tests and demos
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+
+      - name: Install dependencies
+        run: pip install -r requirements-dev.txt
+
+      - name: Unit tests
+        run: python -m pytest -q
+
+      - name: Demo on the sample text (mock extractor, no database)
+        run: PYTHONPATH=. python scripts/run_demo_light.py --text test_files/demo_story.txt --character "Aurelia Maren"
+
+      - name: Demo on the sample PDF
+        run: PYTHONPATH=. python scripts/run_demo_light.py --pdf test_files/demo_story.pdf --character "Aurelia Maren"
+
+  integration-postgres:
+    name: Integration test (PostgreSQL)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    services:
+      postgres:
+        image: postgres:15-alpine
+        env:
+          POSTGRES_USER: kg
+          POSTGRES_PASSWORD: kgpass
+          POSTGRES_DB: kg
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U kg"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      TEST_DATABASE_URL: postgresql+psycopg2://kg:kgpass@localhost:5432/kg
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+
+      - name: Install dependencies
+        run: pip install -r requirements-dev.txt
+
+      # The test is skipped when TEST_DATABASE_URL is missing; treat a skip here as a failure.
+      - name: Ingest, query and walk against PostgreSQL
+        shell: bash
+        run: |
+          python -m pytest tests/test_integration.py -v | tee integration.log
+          if grep -q SKIPPED integration.log; then echo "the integration test was skipped"; exit 1; fi
+
+  integration-neo4j:
+    name: Integration test (PostgreSQL and Neo4j)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:15-alpine
+        env:
+          POSTGRES_USER: kg
+          POSTGRES_PASSWORD: kgpass
+          POSTGRES_DB: kg
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U kg"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      neo4j:
+        image: neo4j:5.23
+        env:
+          NEO4J_AUTH: neo4j/kgneo4jpass
+        ports:
+          - 7687:7687
+        options: >-
+          --health-cmd "cypher-shell -u neo4j -p kgneo4jpass 'RETURN 1'"
+          --health-interval 10s
+          --health-timeout 10s
+          --health-retries 12
+          --health-start-period 20s
+    env:
+      TEST_DATABASE_URL: postgresql+psycopg2://kg:kgpass@localhost:5432/kg
+      TEST_NEO4J_URI: bolt://localhost:7687
+      TEST_NEO4J_USER: neo4j
+      TEST_NEO4J_PASSWORD: kgneo4jpass
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+
+      - name: Install dependencies
+        run: pip install -r requirements-dev.txt
+
+      # With the TEST_NEO4J_* variables set, ingestion also writes to Neo4j and the
+      # query and walk read from it.
+      - name: Ingest, query and walk with the Neo4j projection
+        shell: bash
+        run: |
+          python -m pytest tests/test_integration.py -v | tee integration.log
+          if grep -q SKIPPED integration.log; then echo "the integration test was skipped"; exit 1; fi

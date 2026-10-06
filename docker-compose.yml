@@ -1,3 +1,5 @@
+# Local development stack. The database and Neo4j passwords below are defaults for a
+# local machine only; set your own before exposing either service.
 version: "3.9"
 
 services:

@@ -1,2 +1,4 @@
 -r requirements.txt
 pytest>=7.0
+# FastAPI's TestClient, used by tests/test_integration.py
+httpx>=0.27

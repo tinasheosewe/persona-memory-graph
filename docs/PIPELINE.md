@@ -14,8 +14,9 @@ This doc explains how the toolkit turns raw documents into a character-focused k
 - **Types**: `kg/types.py` defines `Segment`, `NodeCandidate`, `EdgeCandidate`.
 
 ## Data model (shared intent across stores)
-- Node types: `Character`, `Person`, `Event`, `Concept`, `Work`, `Place`, `Period`, `SourceSegment`, **`Episode`**, **`Principle`**.
-- Edge vocab (examples): `RELATES_TO`, `BELIEVES_IN`, `OPPOSES`, `INFLUENCED_BY`, `REFERENCES`, `SUPPORTS`, `CONTRADICTS`, `MENTORED_BY`, `PARTICIPATED_IN`, `OCCURRED_AT`, `OCCURRED_DURING`.
+- Node types: `Character`, `Person`, `Event`, `Concept`, `Organization`, `Work`, `Place`, `Period`, `SourceSegment`, **`Episode`**, **`Principle`**.
+- Edge vocab: the fixed list in `kg/types.py` (`RelationLiteral`), for example `RELATES_TO`, `BELIEVES`, `OPPOSES`, `INFLUENCES`, `REFERENCES`, `SUPPORTS`, `CONTRADICTS`, `PART_OF`, `PRECEDES`, `CAUSES`, `EVIDENCED_BY`. A relation outside the list is mapped to `RELATES_TO`, and the extraction result keeps the original name in `meta.original_relation`.
+- Partitioning: nodes, edges and Neo4j entities carry a `character_key` (default `default`) so several characters can share one database.
 - Source linkage: every node/edge can carry `source_ids` that point to the `SourceSegment` rows/nodes created from the text.
 
 ### Episodic / principle modeling
@@ -39,12 +40,12 @@ Two options:
 - **Graph-only write**: call `CypherGraphBuilder.build_from_text(text, work_name, character=...)` to segment, extract, and push directly to the graph.
 
 What `CypherGraphBuilder` writes:
-1. `Work` + `SourceSegment` nodes: `MERGE` a `Work` node and `HAS_SEGMENT` relationships to `SourceSegment` nodes (properties: `id`, `content`, `location`, `meta`).
-2. Entity nodes: `MERGE` by `name` with a label matching `type` (e.g., `:Character`, `:Event`). Properties: `alias_names`, `summary`, `meta`, `source_ids`.
+1. `Work` + `SourceSegment` nodes: `MERGE` a `Work` node and `HAS_SEGMENT` relationships to `SourceSegment` nodes (properties: `id`, `content`, `location`, `character_key`).
+2. Entity nodes: `MERGE` by `name` and `character_key` with a label matching `type` (e.g., `:Character`, `:Event`). Properties: `type`, `alias_names`, `summary`, `source_ids`.
 3. Edges: `MERGE` relationships using sanitized uppercase relation names (e.g., `OPPOSES`, `REFERENCES`), updating `description`, `weight`, `source_ids`.
 
 ## LLM extraction contract
-`LLMExtractor` sends a prompt with numbered segments and expects JSON:
+`LLMExtractor` sends a prompt with the segments (each prefixed by its id) and a JSON-schema `response_format`, and expects JSON:
 ```json
 {
   "nodes": [
@@ -56,7 +57,7 @@ What `CypherGraphBuilder` writes:
 }
 ```
 Tips:
-- Provide a controlled relation list to the extractor (`relations=[...]`) to keep outputs consistent.
+- Provide a controlled relation list to the extractor (`relations=[...]`) to keep outputs consistent. The names must come from `RelationLiteral` in `kg/types.py`; the default is the whole list.
 - Include the focus `character` name so the model grounds pronouns and implicit mentions.
 - Treat `source_id` as mandatory in your prompting so you can trace every fact to text.
 
@@ -69,6 +70,8 @@ Tips:
   - Evidence via `MATCH (w:Work)-[:HAS_SEGMENT]->(s:SourceSegment) WHERE s.id IN $source_ids RETURN s`.
 
 Use these results to build LLM context: node summaries + labeled edges + supporting segment text.
+
+The FastAPI service in `app/main.py` wraps these patterns: `POST /query` returns a focus node with its edges (one hop), and `POST /llm-walk` starts from the same place and lets the LLM choose which nodes to expand next, fetching their edges and neighbours at each step. Both are described in the README.
 
 ## Operational notes
 - Postgres: set `DATABASE_URL`, run through `create_engine_and_session()`. Add `pgvector` columns if you want embeddings later.

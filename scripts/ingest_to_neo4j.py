@@ -5,9 +5,9 @@ Requires:
 - NEO4J_URI, NEO4J_USER, NEO4J_PASSWORD
 - Optional: OPENAI_API_KEY to use LLMExtractor; otherwise uses MockExtractor.
 
-Usage:
-  python scripts/ingest_to_neo4j.py --text test_files/demo_story.txt --character Aurelia
-  python scripts/ingest_to_neo4j.py --pdf test_files/demo_story.pdf --character Aurelia
+Usage (from the repository root):
+  PYTHONPATH=. python scripts/ingest_to_neo4j.py --text test_files/demo_story.txt --character Aurelia
+  PYTHONPATH=. python scripts/ingest_to_neo4j.py --pdf test_files/demo_story.pdf --character Aurelia
 """
 
 import argparse

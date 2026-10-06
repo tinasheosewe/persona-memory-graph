@@ -10,7 +10,7 @@ PDF_PATH_DEFAULT="$ROOT/test_files/demo_story.pdf"
 
 export USE_PDF=1
 export PDF_PATH="${PDF_PATH:-$PDF_PATH_DEFAULT}"
-export CHARACTER="${CHARACTER:-Warren Buffett}"
+export CHARACTER="${CHARACTER:-Aurelia Maren}"
 export WORK_NAME="${WORK_NAME:-Demo Story}"
 
 exec "$SCRIPT_DIR/run_demo.sh"

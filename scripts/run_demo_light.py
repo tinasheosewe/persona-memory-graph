@@ -4,10 +4,10 @@ Lightweight demo: no database required.
 Reads a text or PDF file, segments it, runs the extractor, and prints segments + extracted nodes/edges.
 By default uses MockExtractor. Use --use-llm to call OpenAI (requires OPENAI_API_KEY).
 
-Usage:
-  python scripts/run_demo_light.py --text test_files/demo_story.txt --character "Aurelia Maren"
-  python scripts/run_demo_light.py --pdf test_files/demo_story.pdf --character "Aurelia Maren"
-  python scripts/run_demo_light.py --text test_files/demo_story.txt --use-llm --character "Aurelia Maren"
+Usage (from the repository root):
+  PYTHONPATH=. python scripts/run_demo_light.py --text test_files/demo_story.txt --character "Aurelia Maren"
+  PYTHONPATH=. python scripts/run_demo_light.py --pdf test_files/demo_story.pdf --character "Aurelia Maren"
+  PYTHONPATH=. python scripts/run_demo_light.py --text test_files/demo_story.txt --use-llm --character "Aurelia Maren"
 """
 
 import argparse

@@ -1,8 +1,8 @@
 """
 Demo script: ingest a PDF, build the graph, and print nodes/edges.
 
-Usage:
-  python scripts/pdf_demo.py --pdf test_files/sample.pdf --character "Marcus"
+Usage (from the repository root):
+  PYTHONPATH=. python scripts/pdf_demo.py --pdf test_files/demo_story.pdf --character "Aurelia Maren"
 Environment:
   - DATABASE_URL must point to Postgres (e.g., postgresql+psycopg2://user:pass@localhost:5432/kg)
 Extractor:
@@ -47,7 +47,7 @@ def print_nodes_and_edges(session):
 
 def main():
     parser = argparse.ArgumentParser(description="Ingest a PDF and print graph contents.")
-    parser.add_argument("--pdf", required=True, help="Path to PDF file (e.g., test_files/sample.pdf)")
+    parser.add_argument("--pdf", required=True, help="Path to PDF file (e.g., test_files/demo_story.pdf)")
     parser.add_argument("--character", help="Focus character name to seed the extractor")
     parser.add_argument("--work-name", help="Override work name (defaults to PDF stem)")
     parser.add_argument("--database-url", help="Postgres URL; defaults to DATABASE_URL env var")
